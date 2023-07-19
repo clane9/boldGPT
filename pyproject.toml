@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "boldgpt"
+version = "0.1.0"
+description = "BOLD brain activity GPT"
+authors = ["Connor Lane <connor.lane858@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.8.3,<3.12"
+torch = "2.0.1"
+torchvision = "0.15.2"
+timm = "0.9.2"
+scipy = "1.10.1"
+shapely = "2.0.1"
+scikit-learn = "1.2.1"
+
+[tool.poetry.group.dev.dependencies]
+pre-commit = "3.3.3"
+black = "23.7.0"
+flake8 = "6.0.0"
+isort = "5.12.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
