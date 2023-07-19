@@ -11,20 +11,18 @@ Clone the repo, install [poetry](https://python-poetry.org/), and run `poetry in
 ## Roadmap
 
 - [ ] Pre-process the [natural scenes dataset](https://naturalscenesdataset.org/) for GPT consumption
-  - [ ] Extract visual cortex ROI activity
-  - [ ] Flat map projection
-  - [ ] Parcellate into square patches ("patchify")
-  - [ ] Encode patch activities as discrete integer "tokens" ("tokenize")
+  - [ ] NSD "beta" activity vectors to flat maps
+  - [ ] Flat maps to tokenized patch sequences
 - [ ] Implement baselines
   - [ ] PCA masked patch prediction
 - [ ] Adapt model and train code from popular GPT libraries
-  - [ ] - [nanoGpt](https://github.com/karpathy/nanoGPT)
-  - [ ] - [facebookresearch/mae](https://github.com/facebookresearch/mae) (not actually GPT but close enough)
+  - [ ] [nanoGpt](https://github.com/karpathy/nanoGPT)
+  - [ ] [facebookresearch/mae](https://github.com/facebookresearch/mae) (not actually GPT but close enough)
 - [ ] Figure out what to do about patch order
   - [ ] Fixed arbitrary order
   - [ ] Fixed hand-designed order
   - [ ] Shuffled order
-  - [ ] Ignore order
+  - [ ] Ignore order (i.e. non-auto-regressive MAE)
 - [ ] Train models
   - [ ] Small models on colab
   - [ ] Bigger models on HPC
