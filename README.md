@@ -6,7 +6,18 @@ Humans struggle to "see" the structure in functional MRI (BOLD) brain maps. Our 
 
 ## Installation
 
-Clone the repo, install [poetry](https://python-poetry.org/), and run `poetry install`.
+Clone the repo and install the package in a new virtual environment
+
+```bash
+git clone https://github.com/clane9/boldGPT.git
+cd boldGPT
+
+python3 -m venv --prompt boldgpt .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -r requirements.txt
+pip install -e .
+```
 
 ## Roadmap
 

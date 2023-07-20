@@ -11,14 +11,18 @@ __pycache__/
 *.egg-info/
 dist
 build
-.venv/
+_version.py
 
 # VScode IDE
 .vscode/
 .env
 
+# Virtual environment
+.venv/
+
 # Local data and scratch
 .scratch
+data
 
 # Jupyter
 .ipynb_checkpoints
