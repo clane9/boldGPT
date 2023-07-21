@@ -22,7 +22,7 @@ pip install -e .
 ## Roadmap
 
 - [ ] Pre-process the [natural scenes dataset](https://naturalscenesdataset.org/) for GPT consumption
-  - [ ] NSD "beta" activity vectors to flat maps
+  - [x] NSD "beta" activity vectors to flat maps ([NSD-Flat](nsd_flat))
   - [ ] Flat maps to tokenized patch sequences
 - [ ] Implement baselines
   - [ ] PCA masked patch prediction
