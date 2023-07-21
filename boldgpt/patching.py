@@ -7,11 +7,7 @@ from torch import nn
 
 class MaskedPatchify(nn.Module):
     """
-    Patchify images restricted to a mask.
-
-    Args:
-        mask: tensor mask, shape (H, W)
-        patch_size: patch size
+    Patchify images restricted to a mask, shape (H, W).
     """
 
     def __init__(
@@ -64,6 +60,8 @@ class MaskedPatchify(nn.Module):
         """
         Convert images, shape (N, C, H, W), to patches, shape (N, L, D).
         """
+        assert img.shape[-3:] == (self.num_channels, self.height, self.width)
+
         img = self.pad(img)
         patches = self.to_patches(img)
         patches = patches[..., self.patch_indices, :]
@@ -73,12 +71,13 @@ class MaskedPatchify(nn.Module):
         """
         Convert patches, shape (N, L, D), back to images, shape (N, C, H, W).
         """
-        N, _, C = patches.shape
+        assert patches.shape[-2:] == (self.num_patches, self.embed_dim)
+        N, _, D = patches.shape
 
         # Inverse masking
         num_total_patches = len(self.patch_mask)
         expanded = torch.zeros(
-            (N, num_total_patches, C), dtype=patches.dtype, device=patches.device
+            (N, num_total_patches, D), dtype=patches.dtype, device=patches.device
         )
         expanded[:, self.patch_indices, :] = patches
 
