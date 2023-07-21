@@ -21,9 +21,9 @@ pip install -e .
 
 ## Roadmap
 
-- [ ] Pre-process the [natural scenes dataset](https://naturalscenesdataset.org/) for GPT consumption
+- [x] Pre-process the [natural scenes dataset](https://naturalscenesdataset.org/) for GPT consumption
   - [x] NSD "beta" activity vectors to flat maps ([NSD-Flat](nsd_flat))
-  - [ ] Flat maps to tokenized patch sequences
+  - [x] Flat maps to tokenized patch sequences ([`MaskedPatchify`](boldgpt/patching.py))
 - [ ] Implement baselines
   - [ ] PCA masked patch prediction
 - [ ] Adapt model and train code from popular GPT libraries
