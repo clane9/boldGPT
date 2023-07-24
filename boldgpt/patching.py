@@ -14,7 +14,7 @@ class MaskedPatchify(nn.Module):
         self,
         mask: torch.Tensor,
         patch_size: int = 8,
-        num_channels: int = 3,
+        in_chans: int = 3,
     ):
         super().__init__()
         mask = torch.as_tensor(mask > 0)
@@ -22,10 +22,10 @@ class MaskedPatchify(nn.Module):
         H, W = mask.shape
 
         self.patch_size = patch_size
-        self.num_channels = num_channels
+        self.in_chans = in_chans
         self.height = H
         self.width = W
-        self.embed_dim = patch_size**2 * num_channels
+        self.dim = patch_size**2 * in_chans
 
         padding = _infer_padding(H, W, multiple=patch_size)
         self.padding = padding
@@ -40,11 +40,11 @@ class MaskedPatchify(nn.Module):
             w=math.ceil(W / patch_size),
             p1=patch_size,
             p2=patch_size,
-            c=num_channels,
+            c=in_chans,
         )
 
         # Patchified mask
-        patch_mask = mask.expand(1, num_channels, -1, -1)
+        patch_mask = mask.expand(1, in_chans, -1, -1)
         patch_mask = self.pad(patch_mask)
         patch_mask = self.to_patches(patch_mask).squeeze(0)
 
@@ -58,20 +58,22 @@ class MaskedPatchify(nn.Module):
 
     def forward(self, img: torch.Tensor) -> torch.Tensor:
         """
-        Convert images, shape (N, C, H, W), to patches, shape (N, L, D).
+        Convert images, shape (N,[ C,] H, W), to patches, shape (N, L, D).
         """
-        assert img.shape[-3:] == (self.num_channels, self.height, self.width)
+        if self.in_chans == 1 and img.ndim == 3:
+            img = img.unsqueeze(1)
+        assert img.shape[-3:] == (self.in_chans, self.height, self.width)
 
         img = self.pad(img)
         patches = self.to_patches(img)
         patches = patches[..., self.patch_indices, :]
         return patches
 
-    def inverse(self, patches: torch.Tensor) -> torch.Tensor:
+    def inverse(self, patches: torch.Tensor, squeeze: bool = True) -> torch.Tensor:
         """
         Convert patches, shape (N, L, D), back to images, shape (N, C, H, W).
         """
-        assert patches.shape[-2:] == (self.num_patches, self.embed_dim)
+        assert patches.shape[-2:] == (self.num_patches, self.dim)
         N, _, D = patches.shape
 
         # Inverse masking
@@ -85,6 +87,9 @@ class MaskedPatchify(nn.Module):
         img = self.from_patches(expanded)
         left, _, top, _ = self.padding
         img = img[..., top : top + self.height, left : left + self.width]
+
+        if squeeze and self.in_chans == 1:
+            img = img.squeeze(1)
         return img
 
     def extra_repr(self) -> str:
