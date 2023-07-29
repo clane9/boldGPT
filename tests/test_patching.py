@@ -23,18 +23,18 @@ def mask() -> torch.Tensor:
 
 @pytest.fixture()
 def img() -> torch.Tensor:
-    img = torch.randn(4, 3, HEIGHT, WIDTH)
+    img = torch.randn(4, HEIGHT, WIDTH)
     return img
 
 
 def test_patchify(mask: np.ndarray, img: torch.Tensor):
     img = mask * img
 
-    patchify = MaskedPatchify(mask, patch_size=8, num_channels=3)
+    patchify = MaskedPatchify(mask, patch_size=8)
     logging.info("%s", patchify)
 
     patches = patchify(img)
-    assert patches.shape == (4, 593, 192)
+    assert patches.shape == (4, 593, 64)
 
     img2 = patchify.inverse(patches)
     assert torch.allclose(img, img2)

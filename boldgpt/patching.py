@@ -10,87 +10,96 @@ class MaskedPatchify(nn.Module):
     Patchify images restricted to a mask, shape (H, W).
     """
 
-    def __init__(
-        self,
-        mask: torch.Tensor,
-        patch_size: int = 8,
-        in_chans: int = 3,
-    ):
-        super().__init__()
-        mask = torch.as_tensor(mask > 0)
+    mask: torch.Tensor
+    patch_mask: torch.Tensor
+    patch_indices: torch.Tensor
+
+    def __init__(self, mask: torch.Tensor, patch_size: int = 8):
         assert mask.ndim == 2, f"Invalid mask shape {mask.shape}; expected (H, W)"
+
+        super().__init__()
+        mask = torch.as_tensor(mask > 0, dtype=torch.bool)
         H, W = mask.shape
 
         self.patch_size = patch_size
-        self.in_chans = in_chans
         self.height = H
         self.width = W
-        self.dim = patch_size**2 * in_chans
+        self.dim = patch_size**2
 
         padding = _infer_padding(H, W, multiple=patch_size)
         self.padding = padding
 
         self.pad = nn.ConstantPad2d(padding, 0.0)
         self.to_patches = Rearrange(
-            "b c (h p1) (w p2) -> b (h w) (p1 p2 c)", p1=patch_size, p2=patch_size
+            "b (h p1) (w p2) -> b (h w) (p1 p2)", p1=patch_size, p2=patch_size
         )
         self.from_patches = Rearrange(
-            "b (h w) (p1 p2 c) -> b c (h p1) (w p2)",
+            "b (h w) (p1 p2) -> b (h p1) (w p2)",
             h=math.ceil(H / patch_size),
             w=math.ceil(W / patch_size),
             p1=patch_size,
             p2=patch_size,
-            c=in_chans,
         )
 
         # Patchified mask
-        patch_mask = mask.expand(1, in_chans, -1, -1)
+        patch_mask = mask.expand(1, -1, -1)
         patch_mask = self.pad(patch_mask)
         patch_mask = self.to_patches(patch_mask).squeeze(0)
+        self.num_total_patches = len(patch_mask)
 
         # Indices of patches intersecting the mask
         patch_indices = torch.where(torch.any(patch_mask, dim=1))[0]
+        patch_mask = patch_mask[patch_indices]
         self.num_patches = len(patch_indices)
 
         self.register_buffer("mask", mask)
         self.register_buffer("patch_mask", patch_mask)
         self.register_buffer("patch_indices", patch_indices)
 
-    def forward(self, img: torch.Tensor) -> torch.Tensor:
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
         """
-        Convert images, shape (N,[ C,] H, W), to patches, shape (N, L, D).
+        Convert images, shape (N, H, W), to patches, shape (N, L, D).
         """
-        if self.in_chans == 1 and img.ndim == 3:
-            img = img.unsqueeze(1)
-        assert img.shape[-3:] == (self.in_chans, self.height, self.width)
+        squeeze = False
+        if images.ndim == 2:
+            images = images[None, ...]
+            squeeze = True
 
-        img = self.pad(img)
-        patches = self.to_patches(img)
+        images = self.pad(images)
+        patches = self.to_patches(images)
         patches = patches[..., self.patch_indices, :]
+
+        if squeeze:
+            patches = patches.squeeze(0)
         return patches
 
-    def inverse(self, patches: torch.Tensor, squeeze: bool = True) -> torch.Tensor:
+    def inverse(self, patches: torch.Tensor) -> torch.Tensor:
         """
-        Convert patches, shape (N, L, D), back to images, shape (N, C, H, W).
+        Convert patches, shape (N, L, D), back to images, shape (N, H, W).
         """
-        assert patches.shape[-2:] == (self.num_patches, self.dim)
+        squeeze = False
+        if patches.ndim == 2:
+            patches = patches[None, ...]
+            squeeze = True
+
         N, _, D = patches.shape
+        dtype = patches.dtype
+        device = patches.device
 
         # Inverse masking
-        num_total_patches = len(self.patch_mask)
         expanded = torch.zeros(
-            (N, num_total_patches, D), dtype=patches.dtype, device=patches.device
+            (N, self.num_total_patches, D), dtype=dtype, device=device
         )
-        expanded[:, self.patch_indices, :] = patches
+        expanded[..., self.patch_indices, :] = patches
 
         # Crop to original size
-        img = self.from_patches(expanded)
+        images = self.from_patches(expanded)
         left, _, top, _ = self.padding
-        img = img[..., top : top + self.height, left : left + self.width]
+        images = images[..., top : top + self.height, left : left + self.width]
 
-        if squeeze and self.in_chans == 1:
-            img = img.squeeze(1)
-        return img
+        if squeeze:
+            images = images.squeeze(0)
+        return images
 
     def extra_repr(self) -> str:
         return (
