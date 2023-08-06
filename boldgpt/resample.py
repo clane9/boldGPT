@@ -11,11 +11,10 @@ Example::
     label_inv = resampler.inverse(label_img)
 """
 
-from typing import Any, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, NamedTuple, Optional, Tuple
 
 import numpy as np
 from scipy import interpolate
-from shapely import MultiPolygon, Polygon
 from sklearn.neighbors import NearestNeighbors
 
 
@@ -206,34 +205,6 @@ class Resampler:
         mask = self.mask_ if image.ndim == 2 else self.mask_[..., None]
         image = np.where(mask, image, fill_value)
         return image
-
-    def transform_poly(
-        self, polys: Union[MultiPolygon, Polygon, List[np.ndarray], np.ndarray]
-    ) -> List[np.ndarray]:
-        """
-        Transform polygons into image grid (relative coordinates).
-        """
-        self._check_fit()
-        xmin, xmax, ymin, ymax = self.bbox_
-
-        if isinstance(polys, MultiPolygon):
-            polys = polys.geoms
-        elif not isinstance(polys, list):
-            polys = [polys]
-
-        transformed = []
-        for poly in polys:
-            if isinstance(poly, Polygon):
-                poly = poly.simplify(self.pixel_size)
-                poly = np.asarray(poly.exterior.coords)
-            else:
-                poly = np.asarray(poly)
-
-            x = (poly[:, 0] - xmin) / (xmax - xmin)
-            y = (poly[:, 1] - ymin) / (ymax - ymin)
-            poly = np.stack([x, y], axis=1)
-            transformed.append(poly)
-        return transformed
 
     def _check_fit(self):
         assert self.points_ is not None, "resampler still needs to be fit"
