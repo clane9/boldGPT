@@ -191,7 +191,7 @@ class BoldGPT(nn.Module):
         num_heads: int = 12,
         mlp_ratio: float = 4.0,
         with_cross: bool = False,
-        is_causal: bool = False,
+        is_decoder: bool = False,
         drop_rate: float = 0.0,
         sub_drop_rate: float = 0.0,
         proj_drop_rate: float = 0.0,
@@ -204,7 +204,7 @@ class BoldGPT(nn.Module):
         self.num_subs = num_subs
         self.num_classes = num_classes
         self.embed_dim = embed_dim
-        self.is_causal = is_causal
+        self.is_decoder = is_decoder
 
         self.patch_embed = nn.Linear(in_features, embed_dim)
 
@@ -212,12 +212,11 @@ class BoldGPT(nn.Module):
         self.sub_embed = nn.Parameter(torch.empty(num_subs, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.empty(num_patches, embed_dim))
         self.next_pos_query = nn.Parameter(torch.empty(num_patches, embed_dim))
-        self.eos_token = nn.Parameter(torch.empty(1, embed_dim))
+        self.eos_query = nn.Parameter(torch.empty(1, embed_dim))
         self.sub_drop = TokenDropout(p=sub_drop_rate)
 
-        dpr = [
-            x.item() for x in torch.linspace(0, drop_path_rate, depth)
-        ]  # stochastic depth decay rule
+        # stochastic depth decay rule
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
         self.blocks = nn.ModuleList(
             [
                 Block(
@@ -248,7 +247,7 @@ class BoldGPT(nn.Module):
         trunc_normal_(self.sub_embed, std=0.02)
         trunc_normal_(self.pos_embed, std=0.02)
         trunc_normal_(self.next_pos_query, std=0.02)
-        trunc_normal_(self.eos_token, std=1e-6)
+        trunc_normal_(self.eos_query, std=1e-6)
         self.apply(self._init_weights)
 
     def _init_weights(self, module: nn.Module):
@@ -270,11 +269,9 @@ class BoldGPT(nn.Module):
         x = x + pos_embed
 
         if sub_indices is not None:
-            # subject encoding with support for missing values coded as negative
-            sub_token = self.sub_embed[sub_indices]
-            missing_mask = sub_indices < 0
-            sub_token = sub_token.masked_fill(missing_mask[:, None, None], 0.0)
-            sub_token = self.group_token + self.sub_drop(sub_token)
+            # subject encoding
+            sub_token = self.sub_drop(self.sub_embed[sub_indices])
+            sub_token = self.group_token + sub_token
         else:
             # group token only
             sub_token = self.group_token.expand(x.size(0), -1, -1)
@@ -284,7 +281,7 @@ class BoldGPT(nn.Module):
         next_pos_query = self.next_pos_query
         if order is not None:
             next_pos_query = next_pos_query[order]
-        next_pos_query = torch.cat([next_pos_query, self.eos_token])
+        next_pos_query = torch.cat([next_pos_query, self.eos_query])
         x = x + next_pos_query
         return x
 
@@ -299,12 +296,12 @@ class BoldGPT(nn.Module):
         x = self._pos_embed(x, sub_indices=sub_indices, order=order)
 
         for block in self.blocks:
-            x = block(x, context=context, is_causal=self.is_causal)
+            x = block(x, context=context, is_causal=self.is_decoder)
 
         x = self.norm(x)
         return x
 
-    def forward_head(self, x: torch.Tensor):
+    def forward_head(self, x: torch.Tensor) -> torch.Tensor:
         x = self.head_drop(x)
         x = self.head(x)
         return x
@@ -315,7 +312,7 @@ class BoldGPT(nn.Module):
         sub_indices: Optional[torch.Tensor] = None,
         context: Optional[torch.Tensor] = None,
         order: Optional[torch.Tensor] = None,
-    ):
+    ) -> torch.Tensor:
         x = self.forward_features(x, sub_indices, context, order)
         x = self.forward_head(x)
         return x
