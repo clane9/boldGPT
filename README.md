@@ -21,22 +21,15 @@ pip install -e .
 
 ## Roadmap
 
-- [x] Pre-process the [natural scenes dataset](https://naturalscenesdataset.org/) for GPT consumption
-  - [x] NSD "beta" activity vectors to flat maps ([NSD-Flat](nsd_flat))
-  - [x] Flat maps to tokenized patch sequences ([`MaskedPatchify`](boldgpt/patching.py))
+- [x] Prepare the [natural scenes dataset](https://naturalscenesdataset.org/) for GPT consumption
+  - [x] NSD "beta" activity vectors to flat maps ([NSD-Flat](nsd_flat), [🤗](https://huggingface.co/datasets/clane9/NSD-Flat))
+  - [x] Flat maps to tokenized patch sequences ([`BoldTokenizer`](boldgpt/tokenizer.py)) supporting raster, radial, and random order.
 - [ ] Implement baselines
   - [ ] PCA masked patch prediction
-- [ ] Adapt model and train code from popular GPT libraries
-  - [ ] [nanoGpt](https://github.com/karpathy/nanoGPT)
-  - [ ] [facebookresearch/mae](https://github.com/facebookresearch/mae) (not actually GPT but close enough)
-- [ ] Figure out what to do about patch order
-  - [ ] Fixed arbitrary order
-  - [ ] Fixed hand-designed order
-  - [ ] Shuffled order
-  - [ ] Ignore order (i.e. non-auto-regressive MAE)
+- [x] Implement model
+  - [x] [`BoldGPT`](boldgpt/model.py) supporting causal/cross attention, masking, and shuffled prediction. Borrows elements from [timm](https://github.com/huggingface/pytorch-image-models/blob/main/timm/models/vision_transformer.py), [nanoGPT](https://github.com/karpathy/nanoGPT), and [BEiT](https://github.com/microsoft/unilm/blob/master/beit/modeling_pretrain.py).
+- [ ] Implement train and inference scripts
 - [ ] Train models
-  - [ ] Small models on colab
-  - [ ] Bigger models on HPC
 - [ ] Evaluate masked patch prediction
 - [ ] Generate pretty brain maps
 

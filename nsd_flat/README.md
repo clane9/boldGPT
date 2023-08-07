@@ -1,6 +1,6 @@
 # NSD-Flat
 
-A [Huggingface](https://huggingface.co/docs/datasets/index) dataset of pre-processed brain activity flat maps from the [Natural Scenes Dataset](https://naturalscenesdataset.org/), constrained to a visual cortex region of interest and rendered as PNG images.
+A [Huggingface dataset](https://huggingface.co/datasets/clane9/NSD-Flat) of pre-processed brain activity flat maps from the [Natural Scenes Dataset](https://naturalscenesdataset.org/), constrained to a visual cortex region of interest and rendered as PNG images.
 
 ## Building the dataset
 
