@@ -208,6 +208,7 @@ class BoldGPT(nn.Module):
 
         self.patch_embed = nn.Linear(in_features, embed_dim)
 
+        self.mask_token = nn.Parameter(torch.empty(1, 1, embed_dim))
         self.group_token = nn.Parameter(torch.empty(1, 1, embed_dim))
         self.sub_embed = nn.Parameter(torch.empty(num_subs, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.empty(num_patches, embed_dim))
@@ -243,11 +244,12 @@ class BoldGPT(nn.Module):
         self.init_weights()
 
     def init_weights(self):
+        trunc_normal_(self.mask_token, std=0.02)
         nn.init.normal_(self.group_token, std=1e-6)
         trunc_normal_(self.sub_embed, std=0.02)
         trunc_normal_(self.pos_embed, std=0.02)
         trunc_normal_(self.next_pos_query, std=0.02)
-        trunc_normal_(self.eos_query, std=1e-6)
+        trunc_normal_(self.eos_query, std=0.02)
         self.apply(self._init_weights)
 
     def _init_weights(self, module: nn.Module):
@@ -255,6 +257,23 @@ class BoldGPT(nn.Module):
             trunc_normal_(module.weight, std=0.02)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
+
+    def _mask_pos(
+        self,
+        x: torch.Tensor,
+        bool_masked_pos: Optional[torch.Tensor] = None,
+    ):
+        if bool_masked_pos is None:
+            return x
+
+        # token masking following BEiT
+        B, N, _ = x.shape
+        mask_token = self.mask_token.expand(B, N, -1)
+
+        # replace the masked visual tokens by mask_token
+        w = bool_masked_pos.unsqueeze(-1).type_as(mask_token)
+        x = x * (1 - w) + mask_token * w
+        return x
 
     def _pos_embed(
         self,
@@ -291,9 +310,12 @@ class BoldGPT(nn.Module):
         sub_indices: Optional[torch.Tensor] = None,
         context: Optional[torch.Tensor] = None,
         order: Optional[torch.Tensor] = None,
+        bool_masked_pos: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         x = self.patch_embed(x)
-        x = self._pos_embed(x, sub_indices=sub_indices, order=order)
+
+        x = self._mask_pos(x, bool_masked_pos)
+        x = self._pos_embed(x, sub_indices, order)
 
         for block in self.blocks:
             x = block(x, context=context, is_causal=self.is_decoder)
@@ -312,8 +334,23 @@ class BoldGPT(nn.Module):
         sub_indices: Optional[torch.Tensor] = None,
         context: Optional[torch.Tensor] = None,
         order: Optional[torch.Tensor] = None,
+        bool_masked_pos: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        x = self.forward_features(x, sub_indices, context, order)
+        """
+        Args:
+            x: input tokens (B, N, P)
+            sub_indices: subject indices (B,)
+            context: context features (B, M, C)
+            order: token order (B, N) or (N,)
+            bool_masked_pos: masked token positions (B, N)
+        """
+        x = self.forward_features(
+            x,
+            sub_indices=sub_indices,
+            context=context,
+            order=order,
+            bool_masked_pos=bool_masked_pos,
+        )
         x = self.forward_head(x)
         return x
 
@@ -328,6 +365,13 @@ class BoldGPT(nn.Module):
             for name, p in self.named_parameters()
             if p.ndim < 2
             or name
-            in {"group_token", "sub_embed", "pos_embed", "next_pos_query", "eos_query"}
+            in {
+                "mask_token",
+                "group_token",
+                "sub_embed",
+                "pos_embed",
+                "next_pos_query",
+                "eos_query",
+            }
         }
         return params
