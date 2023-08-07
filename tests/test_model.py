@@ -39,6 +39,10 @@ def test_boldgpt(is_decoder: bool, with_cross: bool, shuffle: bool):
     y = model.forward(x, sub_indices, context=context, order=order)
     assert y.shape == (16, 101, 512)
 
+    if is_decoder and with_cross and shuffle:
+        no_decay_params = model.no_decay_named_parameters()
+        logging.info("No decay params:\n%s", list(no_decay_params.keys()))
+
 
 if __name__ == "__main__":
     pytest.main([__file__])

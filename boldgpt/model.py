@@ -1,4 +1,4 @@
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
 import torch
 import torch.nn.functional as F
@@ -316,3 +316,18 @@ class BoldGPT(nn.Module):
         x = self.forward_features(x, sub_indices, context, order)
         x = self.forward_head(x)
         return x
+
+    def no_decay_named_parameters(self) -> Dict[str, nn.Parameter]:
+        """
+        Return a dict of named parameters that should not be weight decayed.
+        """
+        # Don't decay biases, layernorms, or position embeddings
+        # Combination of what's done in timm and nanoGPT
+        params = {
+            name: p
+            for name, p in self.named_parameters()
+            if p.ndim < 2
+            or name
+            in {"group_token", "sub_embed", "pos_embed", "next_pos_query", "eos_query"}
+        }
+        return params
