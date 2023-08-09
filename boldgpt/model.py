@@ -258,14 +258,7 @@ class BoldGPT(nn.Module):
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
 
-    def _mask_pos(
-        self,
-        x: torch.Tensor,
-        bool_masked_pos: Optional[torch.Tensor] = None,
-    ):
-        if bool_masked_pos is None:
-            return x
-
+    def _mask_pos(self, x: torch.Tensor, bool_masked_pos: torch.Tensor) -> torch.Tensor:
         # token masking following BEiT
         B, N, _ = x.shape
         mask_token = self.mask_token.expand(B, N, -1)
@@ -280,7 +273,7 @@ class BoldGPT(nn.Module):
         x: torch.Tensor,
         sub_indices: Optional[torch.Tensor] = None,
         order: Optional[torch.Tensor] = None,
-    ):
+    ) -> torch.Tensor:
         # learned position encoding
         pos_embed = self.pos_embed
         if order is not None:
@@ -314,7 +307,8 @@ class BoldGPT(nn.Module):
     ) -> torch.Tensor:
         x = self.patch_embed(x)
 
-        x = self._mask_pos(x, bool_masked_pos)
+        if bool_masked_pos is not None:
+            x = self._mask_pos(x, bool_masked_pos)
         x = self._pos_embed(x, sub_indices, order)
 
         for block in self.blocks:
