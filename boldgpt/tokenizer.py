@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 from sklearn.cluster import MiniBatchKMeans
@@ -17,8 +17,6 @@ class BoldTokenizer(nn.Module):
     - raster: original image raster order
     - radial: tokens sorted by distance from mask centroid
     - random: fixed random token ordering
-
-    In addition, there is an option to shuffle the token ordering for each batch.
     """
 
     vocab: torch.Tensor
@@ -137,3 +135,44 @@ class BoldTokenizer(nn.Module):
 
     def extra_repr(self) -> str:
         return f"vocab_size={self.vocab_size}, ordering={self.ordering}"
+
+
+class BoldShuffle(nn.Module):
+    """
+    Shuffle token order.
+    """
+
+    _order: Optional[torch.Tensor]
+
+    def __init__(self):
+        super().__init__()
+        self._order = None
+
+    def forward(
+        self, patches: torch.Tensor, tokens: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        B, N, _ = patches.shape
+        device = patches.device
+
+        order = torch.argsort(torch.rand(B, N, device=device), dim=1)
+        patches = torch.take_along_dim(patches, order[..., None], dim=1)
+        tokens = torch.take_along_dim(tokens, order, dim=1)
+
+        self._order = order
+        return patches, tokens, order
+
+    def inverse(
+        self, tokens: torch.Tensor, order: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        if order is None:
+            order = self._order
+
+        assert order is not None, "order required"
+        assert tokens.ndim in {2, 3}, "invalid tokens"
+        assert tokens.shape[:2] == order.shape, "token and order shapes don't match"
+
+        ranking = torch.argsort(order, dim=1)
+        if tokens.ndim == 3:
+            ranking = ranking[..., None]
+        tokens = torch.take_along_dim(tokens, ranking, dim=1)
+        return tokens

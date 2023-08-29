@@ -1,9 +1,12 @@
-from typing import Callable, Dict, Optional
+import logging
+from typing import Callable, List, Optional
 
 import torch
 import torch.nn.functional as F
 from timm.layers import DropPath, Mlp, trunc_normal_
 from torch import nn
+
+from .registry import register_model
 
 Layer = Callable[..., nn.Module]
 
@@ -185,7 +188,7 @@ class BoldGPT(nn.Module):
         num_patches: int,
         in_features: int,
         num_subs: int = 8,
-        num_classes: int = 1000,
+        num_classes: int = 4096,
         embed_dim: int = 768,
         depth: int = 12,
         num_heads: int = 12,
@@ -274,6 +277,8 @@ class BoldGPT(nn.Module):
         sub_indices: Optional[torch.Tensor] = None,
         order: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        B = x.size(0)
+
         # learned position encoding
         pos_embed = self.pos_embed
         if order is not None:
@@ -286,14 +291,16 @@ class BoldGPT(nn.Module):
             sub_token = self.group_token + sub_token
         else:
             # group token only
-            sub_token = self.group_token.expand(x.size(0), -1, -1)
+            sub_token = self.group_token.expand(B, -1, -1)
         x = torch.cat([sub_token, x], dim=1)
 
         # learned next position query (for shuffled orders)
         next_pos_query = self.next_pos_query
         if order is not None:
             next_pos_query = next_pos_query[order]
-        next_pos_query = torch.cat([next_pos_query, self.eos_query])
+        next_pos_query = next_pos_query.expand(B, -1, -1)
+        eos_query = self.eos_query.expand(B, -1, -1)
+        next_pos_query = torch.cat([next_pos_query, eos_query], dim=1)
         x = x + next_pos_query
         return x
 
@@ -324,7 +331,7 @@ class BoldGPT(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
+        patches: torch.Tensor,
         sub_indices: Optional[torch.Tensor] = None,
         context: Optional[torch.Tensor] = None,
         order: Optional[torch.Tensor] = None,
@@ -332,30 +339,32 @@ class BoldGPT(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            x: input tokens (B, N, P)
+            patches: input patches (B, N, P)
             sub_indices: subject indices (B,)
             context: context features (B, M, C)
             order: token order (B, N) or (N,)
             bool_masked_pos: masked token positions (B, N)
         """
         x = self.forward_features(
-            x,
+            patches,
             sub_indices=sub_indices,
             context=context,
             order=order,
             bool_masked_pos=bool_masked_pos,
         )
-        x = self.forward_head(x)
+
+        # drop eos query prediction
+        x = self.forward_head(x)[:, :-1]
         return x
 
-    def no_decay_named_parameters(self) -> Dict[str, nn.Parameter]:
+    def nodecay_keys(self) -> List[str]:
         """
-        Return a dict of named parameters that should not be weight decayed.
+        Return a list of parameter names that should not be weight decayed.
         """
         # Don't decay biases, layernorms, or position embeddings
         # Combination of what's done in timm and nanoGPT
-        params = {
-            name: p
+        keys = [
+            name
             for name, p in self.named_parameters()
             if p.ndim < 2
             or name
@@ -367,5 +376,41 @@ class BoldGPT(nn.Module):
                 "next_pos_query",
                 "eos_query",
             }
-        }
-        return params
+        ]
+        return keys
+
+
+@register_model("boldgpt_base")
+def boldgpt_base(
+    num_patches: int,
+    in_features: int,
+    num_subs: int = 8,
+    num_classes: int = 4096,
+    with_cross: bool = False,
+    is_decoder: bool = False,
+    drop_rate: float = 0.0,
+    sub_drop_rate: float = 0.0,
+    proj_drop_rate: float = 0.0,
+    attn_drop_rate: float = 0.0,
+    drop_path_rate: float = 0.0,
+    **kwargs,
+):
+    if kwargs:
+        logging.warning("Extra unused kwargs: %s", kwargs)
+
+    return BoldGPT(
+        num_patches=num_patches,
+        in_features=in_features,
+        num_subs=num_subs,
+        num_classes=num_classes,
+        embed_dim=768,
+        depth=12,
+        num_heads=12,
+        with_cross=with_cross,
+        is_decoder=is_decoder,
+        drop_rate=drop_rate,
+        sub_drop_rate=sub_drop_rate,
+        proj_drop_rate=proj_drop_rate,
+        attn_drop_rate=attn_drop_rate,
+        drop_path_rate=drop_path_rate,
+    )

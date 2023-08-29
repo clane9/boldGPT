@@ -36,10 +36,9 @@ def test_boldgpt():
     y = model.forward(
         x, sub_indices, context=context, order=order, bool_masked_pos=bool_masked_pos
     )
-    assert y.shape == (16, 101, 512)
+    assert y.shape == (16, 100, 512)
 
-    no_decay_params = model.no_decay_named_parameters()
-    logging.info("No decay params:\n%s", list(no_decay_params.keys()))
+    logging.info("No decay params:\n%s", model.nodecay_keys())
 
 
 if __name__ == "__main__":
