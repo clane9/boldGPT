@@ -24,6 +24,7 @@ _version.py
 .scratch
 nsd_flat/data
 nsd_flat/processed
+checkpoints
 
 # Jupyter
 .ipynb_checkpoints
