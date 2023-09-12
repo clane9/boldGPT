@@ -1,3 +1,7 @@
+"""
+Training script for BoldGPT.
+"""
+
 import json
 import logging
 import math
@@ -8,27 +12,30 @@ from argparse import Namespace
 from collections import defaultdict
 from contextlib import suppress
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 import wandb
 import yaml
-from datasets import Dataset, load_dataset
 from hf_argparser import HfArg, HfArgumentParser
-from timm.utils import AverageMeter, random_seed
+from matplotlib import pyplot as plt
+from timm.utils import AverageMeter, random_seed, reduce_tensor
 from torch.cuda.amp import GradScaler
-from torch.utils.data import DataLoader
+from torch.distributed import destroy_process_group, init_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, RandomSampler
+from torch.utils.data.distributed import DistributedSampler
 
 from boldgpt import create_model, list_models
+from boldgpt.data import ActivityTransform, load_nsd_flat
 from boldgpt.model import BoldGPT
-from boldgpt.slug import random_slug
 from boldgpt.tokenizer import BoldShuffle, BoldTokenizer
-from boldgpt.utils import generate_splits, get_sha, seed_hash, setup_logging
+from boldgpt.utils import ClusterInfo, get_exp_name, get_sha, seed_hash, setup_logging
+from boldgpt.visualization import plot_examples
 
 np.set_printoptions(precision=3)
 
@@ -37,6 +44,7 @@ Criterion = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 PROJECT = "boldgpt"
 
 LOG_INTERVAL = 10
+NUM_EXAMPLES = 10
 CKPT_INTERVAL = 5
 MAX_CKPTS = 5
 
@@ -57,11 +65,14 @@ class Args:
     vocab_samples: int = HfArg(
         aliases=["--vss"], default=1000, help="num vocab training samples"
     )
-    tok_state: Optional[str] = HfArg(default=None, help="tokenizer state to load")
+    vocab_state: Optional[str] = HfArg(
+        aliases=["--vst"], default=None, help="tokenizer vocab state to load"
+    )
+    ordering: Optional[str] = HfArg(default="radial", help="default patch ordering")
     # Paths
     out_dir: str = HfArg(default="results", help="path to root output directory")
-    name: Optional[str] = HfArg(default=None, help="experiment name")
     prefix: Optional[str] = HfArg(default=None, help="experiment name prefix")
+    name: Optional[str] = HfArg(default=None, help="full experiment name")
     desc: Optional[str] = HfArg(default=None, help="description to attach to run")
     # Regularization and augmentation
     shuffle: Optional[bool] = HfArg(default=False, help="shuffle patch ordering")
@@ -103,9 +114,11 @@ class Args:
     )
     cuda: bool = HfArg(default=True, help="use cuda")
     amp: bool = HfArg(default=False, help="use AMP")
+    compile: bool = HfArg(default=False, help="use torch compile")
     workers: int = HfArg(aliases=["-j"], default=4, help="data loading workers")
     overwrite: bool = HfArg(default=False, help="overwrite pre-existing results")
     wandb: bool = HfArg(default=False, help="log to wandb")
+    figures: bool = HfArg(default=True, help="generate figures")
     sweep: bool = HfArg(default=False, help="whether we're in a wandb sweep")
     debug: bool = HfArg(default=False, help="quick debug mode")
     seed: int = HfArg(default=42, help="random seed")
@@ -115,33 +128,42 @@ def main(args: Args):
     start_time = time.monotonic()
     random_seed(args.seed)
 
+    # Device and distributed training setup
+    clust = ClusterInfo(args.cuda)
+    if clust.ddp:
+        init_process_group(backend="nccl")
+        torch.cuda.set_device(clust.device)
+
+    # Output naming
     commit_sha = get_sha()
-    if args.name is not None:
-        name = args.name
-    else:
-        name = datetime.now().strftime("%y%m%d%H%M%S")
-        if args.prefix:
-            name = name + "-" + args.prefix
+    if args.name is None:
         name_seed = seed_hash(commit_sha, json.dumps(args.__dict__))
-        name = name + "-" + random_slug(seed=name_seed)
+        name = get_exp_name(args.prefix, seed=name_seed)
+    else:
+        name = args.name
     out_dir = Path(args.out_dir) / PROJECT
     if args.sweep:
         out_dir = out_dir / "sweeps"
     out_dir = out_dir / name
 
+    # Creating output dir
     overwritten = False
     if out_dir.exists():
         if args.overwrite:
             overwritten = True
-            shutil.rmtree(out_dir)
+            if clust.master_process:
+                shutil.rmtree(out_dir)
         else:
             raise FileExistsError(f"Output directory {out_dir} already exists")
-    out_dir.mkdir(parents=True)
-    setup_logging(out_dir)
+    if clust.master_process:
+        out_dir.mkdir(parents=True)
+    setup_logging(out_dir, master_process=clust.master_process)
 
-    if args.wandb and not args.sweep:
+    # Wandb
+    if clust.master_process and args.wandb and not args.sweep:
         wandb.init(project=PROJECT, name=name, config=args.__dict__)
 
+    # Initial logging
     logging.info("Starting training: %s/%s", PROJECT, name)
     logging.info("Args:\n%s", yaml.safe_dump(args.__dict__, sort_keys=False))
     logging.info(commit_sha)
@@ -149,22 +171,24 @@ def main(args: Args):
     logging.info("Writing to %s", out_dir)
     if overwritten:
         logging.warning("Overwriting previous results")
-    with (out_dir / "args.yaml").open("w") as f:
-        yaml.safe_dump(args.__dict__, f, sort_keys=False)
+    if clust.master_process:
+        with (out_dir / "args.yaml").open("w") as f:
+            yaml.safe_dump(args.__dict__, f, sort_keys=False)
 
-    # TODO: multi-gpu training
-    use_cuda = args.cuda and torch.cuda.is_available()
-    device = torch.device("cuda" if use_cuda else "cpu")
-    logging.info("Running on: %s", device)
+    logging.info("Running on: %s", clust)
 
+    # AMP setup
     if args.amp:
-        autocast = partial(torch.autocast, device_type=device.type, dtype=torch.float16)
-        scaler = GradScaler()
         logging.info("Running in mixed precision with native PyTorch AMP")
+        autocast = partial(
+            torch.autocast, device_type=clust.device.type, dtype=torch.float16
+        )
+        scaler = GradScaler()
     else:
         autocast = suppress
         scaler = None
 
+    # Datasets and loaders
     logging.info("Loading NSD-Flat dataset")
     dsets, mask = load_nsd_flat(args)
     for split, ds in dsets.items():
@@ -176,19 +200,31 @@ def main(args: Args):
 
     loaders = {}
     transform = ActivityTransform()
+    if clust.ddp:
+        samplers = {
+            "train": DistributedSampler(dsets["train"], shuffle=True),
+            "val": DistributedSampler(dsets["val"], shuffle=False),
+        }
+    else:
+        samplers = {"train": RandomSampler(dsets["train"]), "val": None}
+
     for split, ds in dsets.items():
         loaders[split] = DataLoader(
             ds,
             batch_size=args.batch_size,
-            shuffle=(split == "train"),
+            sampler=samplers[split],
             num_workers=args.workers,
-            pin_memory=use_cuda,
+            pin_memory=clust.use_cuda,
             collate_fn=Collate(transform),
         )
 
+    # Tokenizer
     logging.info("Creating tokenizer")
     tokenizer = BoldTokenizer(
-        mask, patch_size=args.patch_size, vocab_size=args.vocab_size
+        mask,
+        patch_size=args.patch_size,
+        vocab_size=args.vocab_size,
+        ordering=args.ordering,
     )
     logging.info(
         "Patch size: %d, Num patches: %d, Dim: %d",
@@ -196,54 +232,65 @@ def main(args: Args):
         tokenizer.num_patches,
         tokenizer.dim,
     )
-    if args.tok_state:
-        logging.info("Loading tokenizer vocab state: %s", args.tok_state)
-        state_dict = torch.load(args.tok_state, map_location="cpu")
-        tokenizer.load_state_dict(state_dict)
+
+    if args.vocab_state:
+        logging.info("Loading tokenizer vocab state: %s", args.vocab_state)
+        state_dict = torch.load(args.vocab_state, map_location="cpu")
+        tokenizer.load_vocab(state_dict["vocab"])
     else:
         logging.info("Fitting tokenizer vocab")
         sample_indices = torch.randperm(len(dsets["train"]))[: args.vocab_samples]
         sample_activity = dsets["train"].select(sample_indices)["activity"]
         sample_activity = transform(sample_activity)
-
         tokenizer.fit(sample_activity)
         logging.info("Vocab[:3, :5]: %s", tokenizer.vocab[:3, :5])
-    torch.save(tokenizer.state_dict(), out_dir / "tok_state.pt")
-    tokenizer = tokenizer.to(device)
 
+    torch.save(tokenizer.state_dict(), out_dir / "tok_state.pt")
+    tokenizer = tokenizer.to(clust.device)
+
+    # Model and optimizer
     logging.info("Creating model: %s", args.model)
     model = create_model(
         args.model,
         num_patches=tokenizer.num_patches,
         in_features=tokenizer.dim,
-        num_subs=8,
         num_classes=args.vocab_size,
-        with_cross=False,
-        is_decoder=True,
         drop_rate=args.drop_rate,
         sub_drop_rate=args.sub_drop_rate,
         proj_drop_rate=args.proj_drop_rate,
         attn_drop_rate=args.attn_drop_rate,
         drop_path_rate=args.drop_path_rate,
     )
-    model = model.to(device)
+    model = model.to(clust.device)
     logging.info("%s", model)
     logging.info("Params: %.0fM", sum(p.numel() for p in model.parameters()) / 1e6)
 
+    if clust.ddp:
+        model = DDP(model, device_ids=[clust.local_rank])
+
+    if args.compile:
+        assert hasattr(torch, "compile"), "PyTorch >= 2.0 required for torch.compile"
+        logging.info("Compiling the model")
+        model = torch.compile(model)
+
     optimizer = create_optimizer(args, model)
 
+    # Load checkpoint
     if args.checkpoint:
         logging.info("Loading checkpoint: %s", args.checkpoint)
-        start_epoch, best_metric = load_checkpoint(args, model, optimizer, device)
+        start_epoch, best_metric = load_checkpoint(args, model, optimizer, clust.device)
     else:
         start_epoch = 0
         best_metric = float("inf")
 
     best_epoch = start_epoch
     epoch_steps = math.ceil(len(loaders["train"]) / args.grad_accum_steps)
+    logging.info("Steps per epoch: %d", epoch_steps)
 
     for epoch in range(start_epoch, args.epochs):
         logging.info("Starting epoch %d", epoch)
+        if clust.ddp:
+            samplers["train"].set_epoch(epoch)
 
         train(
             args=args,
@@ -252,7 +299,7 @@ def main(args: Args):
             model=model,
             train_loader=loaders["train"],
             optimizer=optimizer,
-            device=device,
+            clust=clust,
             autocast=autocast,
             scaler=scaler,
             out_dir=out_dir,
@@ -265,18 +312,19 @@ def main(args: Args):
             tokenizer=tokenizer,
             model=model,
             val_loader=loaders["val"],
-            device=device,
+            clust=clust,
             out_dir=out_dir,
         )
 
-        save_checkpoint(
-            epoch=epoch,
-            metric=metric,
-            is_best=metric < best_metric,
-            model=model,
-            optimizer=optimizer,
-            out_dir=out_dir,
-        )
+        if clust.master_process:
+            save_checkpoint(
+                epoch=epoch,
+                metric=metric,
+                is_best=metric < best_metric,
+                model=model,
+                optimizer=optimizer,
+                out_dir=out_dir,
+            )
 
         if metric < best_metric:
             best_metric = metric
@@ -285,7 +333,7 @@ def main(args: Args):
         if args.debug:
             break
 
-    if args.wandb:
+    if clust.master_process and args.wandb:
         wandb.log(
             {"score_last": metric, "score_best": best_metric},
             step=args.epochs * epoch_steps,
@@ -294,36 +342,11 @@ def main(args: Args):
     logging.info("Done! Run time: %.0fs", time.monotonic() - start_time)
     logging.info("*** Best metric: %.3f (epoch %d)", best_metric, best_epoch)
 
-
-def load_nsd_flat(args: Args) -> Tuple[Dict[str, Dataset], torch.Tensor]:
-    keep_in_memory = args.cuda and torch.cuda.is_available() and not args.debug
-    ds = load_dataset("clane9/NSD-Flat", split="train", keep_in_memory=keep_in_memory)
-    ds = ds.select_columns(["subject_id", "nsd_id", "activity"])
-    ds.set_format("torch")
-
-    split_indices = generate_splits(len(ds), list(SPLITS.values()), seed=SPLIT_SEED)
-    split_indices_map = {split: ind for split, ind in zip(SPLITS, split_indices)}
-
-    # TODO: do I need keep_in_memory in both places?
-    dsets = {
-        split: ds.select(ind, keep_in_memory=keep_in_memory)
-        for split, ind in split_indices_map.items()
-    }
-
-    # mask of pixels with fMRI data
-    # missing data are coded as all 0
-    example_activity = ds[:100]["activity"]
-    mask = ~torch.all(example_activity == 127, dim=0)
-    return dsets, mask
+    if clust.ddp:
+        destroy_process_group()
 
 
 class Collate(torch.nn.Module):
-    # NOTE: Previously tried using a closure, which worked in the algonauts code. But
-    # got a pickle error.
-    #   AttributeError: Can't pickle local object 'make_collate.<locals>.collate_fn
-    # No clue what changed, maybe some version issue? I'm confused why it worked before,
-    # since closures are not picklable?
-
     def __init__(self, transform: torch.nn.Module):
         super().__init__()
         self.transform = transform
@@ -338,18 +361,6 @@ class Collate(torch.nn.Module):
 
         collated = {k: torch.stack(v) for k, v in collated.items()}
         return collated
-
-
-class ActivityTransform(torch.nn.Module):
-    def __init__(self, vmin: float = -2.5, vmax: float = 2.5):
-        super().__init__()
-        self.vmin = vmin
-        self.vmax = vmax
-
-    def forward(self, act: torch.Tensor):
-        act = act.to(torch.float32) / 255.0
-        act = (self.vmax - self.vmin) * act + self.vmin
-        return act
 
 
 def create_optimizer(args: Args, model: BoldGPT) -> torch.optim.Optimizer:
@@ -375,13 +386,12 @@ def train(
     model: BoldGPT,
     train_loader: DataLoader,
     optimizer: torch.optim.Optimizer,
-    device: torch.device,
+    clust: ClusterInfo,
     autocast: Callable,
     scaler: Optional[GradScaler],
     out_dir: Path,
 ):
-    with_cuda = device.type == "cuda"
-    if with_cuda:
+    if clust.use_cuda:
         torch.cuda.reset_peak_memory_stats()
 
     model.train()
@@ -402,6 +412,7 @@ def train(
     loss_m = AverageMeter()
     data_time_m = AverageMeter()
     step_time_m = AverageMeter()
+    examples = {}
 
     epoch_batches = len(train_loader)
     accum_steps = args.grad_accum_steps
@@ -423,8 +434,8 @@ def train(
             accum_steps = last_accum_steps
 
         # Unpack and map data to cuda
-        activity = sample["activity"].to(device)
-        sub_indices = sample["subject_id"].to(device)
+        activity = sample["activity"].to(clust.device)
+        sub_indices = sample["subject_id"].to(clust.device)
         batch_size = len(activity)
         data_time = time.monotonic() - end
 
@@ -439,11 +450,14 @@ def train(
         with autocast():
             logits = model(patches, sub_indices, order=order)
             loss = F.cross_entropy(logits.flatten(0, 1), tokens.flatten())
-        loss_val = loss.item()
+        if clust.ddp:
+            loss_item = reduce_tensor(loss.detach()).item()
+        else:
+            loss_item = loss.item()
         if accum_steps > 1:
             loss = loss / accum_steps
 
-        if math.isnan(loss_val) or math.isinf(loss_val):
+        if math.isnan(loss_item) or math.isinf(loss_item):
             raise RuntimeError("NaN/Inf loss encountered on step %d; exiting", step)
 
         # Update learning rate according to schedule
@@ -465,18 +479,35 @@ def train(
                 optimizer.step()
 
         # End of iteration timing
-        if with_cuda:
+        if clust.use_cuda:
             torch.cuda.synchronize()
         step_time = time.monotonic() - end
 
-        loss_m.update(loss_val, batch_size)
+        loss_m.update(loss_item, batch_size)
         data_time_m.update(data_time, batch_size)
         step_time_m.update(step_time, batch_size)
 
+        if clust.master_process and batch_idx == 0 and args.figures:
+            pred = logits.detach().argmax(dim=-1)
+            # Unshuffle tokens and predictions if necessary
+            if args.shuffle:
+                tokens = shuffle.inverse(tokens)
+                pred = shuffle.inverse(pred)
+
+            examples["subid"] = sub_indices[:NUM_EXAMPLES]
+            examples["nsdid"] = sample["nsd_id"][:NUM_EXAMPLES]
+            examples["activity"] = activity[:NUM_EXAMPLES]
+            examples["tokens"] = tokens[:NUM_EXAMPLES]
+            examples["pred"] = pred[:NUM_EXAMPLES]
+            examples["order"] = order[:NUM_EXAMPLES] if args.shuffle else None
+
         if (step % LOG_INTERVAL == 0 and need_update) or is_last_batch or args.debug:
             tput = args.batch_size / step_time_m.avg
-            alloc_mem_gb = torch.cuda.max_memory_allocated() / 1e9 if with_cuda else 0.0
-            res_mem_gb = torch.cuda.max_memory_reserved() / 1e9 if with_cuda else 0.0
+            if clust.use_cuda:
+                alloc_mem_gb = torch.cuda.max_memory_allocated() / 1e9
+                res_mem_gb = torch.cuda.max_memory_reserved() / 1e9
+            else:
+                alloc_mem_gb = res_mem_gb = 0.0
 
             logging.info(
                 f"Train: {epoch:>3d} [{batch_idx:>3d}/{epoch_batches}][{step:>6d}]"
@@ -487,28 +518,41 @@ def train(
                 f"  Mem: {alloc_mem_gb:.2f},{res_mem_gb:.2f} GB"
             )
 
-            record = {
-                "step": step,
-                "epoch": epoch,
-                "loss": loss_m.val,
-                "lr": lr,
-                "grad": total_norm,
-                "data_time": data_time_m.avg,
-                "step_time": step_time_m.avg,
-                "tput": tput,
-            }
+            if clust.master_process:
+                record = {
+                    "step": step,
+                    "epoch": epoch,
+                    "loss": loss_m.val,
+                    "lr": lr,
+                    "grad": total_norm,
+                    "data_time": data_time_m.avg,
+                    "step_time": step_time_m.avg,
+                    "tput": tput,
+                }
 
-            with (out_dir / "train_log.json").open("a") as f:
-                print(json.dumps(record), file=f)
+                with (out_dir / "train_log.json").open("a") as f:
+                    print(json.dumps(record), file=f)
 
-            if args.wandb:
-                wandb.log({"train": record}, step=step)
+                if args.wandb:
+                    wandb.log({"train": record}, step=step)
 
         # Restart timer for next iteration
         end = time.monotonic()
 
         if args.debug:
             break
+
+    if clust.master_process and args.figures:
+        example_path = out_dir / "figures" / f"train_examples_{step:06d}.png"
+        example_path.parent.mkdir(exist_ok=True)
+        plot_examples(tokenizer, fname=example_path, **examples)
+
+        if args.wandb:
+            wandb.log(
+                {"figs": {"train_examples": wandb.Image(str(example_path))}}, step=step
+            )
+
+        plt.close("all")
 
 
 @torch.no_grad()
@@ -519,11 +563,10 @@ def validate(
     tokenizer: BoldTokenizer,
     model: BoldGPT,
     val_loader: DataLoader,
-    device: torch.device,
+    clust: ClusterInfo,
     out_dir: Path,
 ) -> float:
-    with_cuda = device.type == "cuda"
-    if with_cuda:
+    if clust.use_cuda:
         torch.cuda.reset_peak_memory_stats()
 
     model.eval()
@@ -531,13 +574,14 @@ def validate(
     loss_m = AverageMeter()
     data_time_m = AverageMeter()
     step_time_m = AverageMeter()
+    examples = {}
 
     epoch_batches = len(val_loader)
     end = time.monotonic()
     for batch_idx, sample in enumerate(val_loader):
         # Unpack and map data to cuda
-        activity = sample["activity"].to(device)
-        sub_indices = sample["subject_id"].to(device)
+        activity = sample["activity"].to(clust.device)
+        sub_indices = sample["subject_id"].to(clust.device)
         batch_size = len(activity)
         data_time = time.monotonic() - end
 
@@ -545,16 +589,26 @@ def validate(
         patches, tokens = tokenizer(activity)
         logits = model(patches, sub_indices)
         loss = F.cross_entropy(logits.flatten(0, 1), tokens.flatten())
-        loss_val = loss.item()
+        if clust.ddp:
+            loss_item = reduce_tensor(loss.detach()).item()
+        else:
+            loss_item = loss.item()
 
         # End of iteration timing
-        if with_cuda:
+        if clust.use_cuda:
             torch.cuda.synchronize()
         step_time = time.monotonic() - end
 
-        loss_m.update(loss_val, batch_size)
+        loss_m.update(loss_item, batch_size)
         data_time_m.update(data_time, batch_size)
         step_time_m.update(step_time, batch_size)
+
+        if clust.master_process and batch_idx == 0 and args.figures:
+            examples["subid"] = sub_indices[:NUM_EXAMPLES]
+            examples["nsdid"] = sample["nsd_id"][:NUM_EXAMPLES]
+            examples["activity"] = activity[:NUM_EXAMPLES]
+            examples["tokens"] = tokens[:NUM_EXAMPLES]
+            examples["pred"] = logits.detach().argmax(-1)[:NUM_EXAMPLES]
 
         if (
             batch_idx % LOG_INTERVAL == 0
@@ -562,8 +616,11 @@ def validate(
             or args.debug
         ):
             tput = args.batch_size / step_time_m.avg
-            alloc_mem_gb = torch.cuda.max_memory_allocated() / 1e9 if with_cuda else 0.0
-            res_mem_gb = torch.cuda.max_memory_reserved() / 1e9 if with_cuda else 0.0
+            if clust.use_cuda:
+                alloc_mem_gb = torch.cuda.max_memory_allocated() / 1e9
+                res_mem_gb = torch.cuda.max_memory_reserved() / 1e9
+            else:
+                alloc_mem_gb = res_mem_gb = 0.0
 
             logging.info(
                 f"Val: {epoch:>3d} [{batch_idx:>3d}/{epoch_batches}]"
@@ -578,20 +635,32 @@ def validate(
         # Reset timer
         end = time.monotonic()
 
-    record = {
-        "step": step,
-        "epoch": epoch,
-        "loss": loss_m.avg,
-        "data_time": data_time_m.avg,
-        "step_time": step_time_m.avg,
-        "tput": tput,
-    }
+    if clust.master_process:
+        record = {
+            "step": step,
+            "epoch": epoch,
+            "loss": loss_m.avg,
+            "data_time": data_time_m.avg,
+            "step_time": step_time_m.avg,
+            "tput": tput,
+        }
 
-    with (out_dir / "val_log.json").open("a") as f:
-        print(json.dumps(record), file=f)
+        with (out_dir / "val_log.json").open("a") as f:
+            print(json.dumps(record), file=f)
 
-    if args.wandb:
-        wandb.log({"val": record}, step=step)
+        if args.wandb:
+            wandb.log({"val": record}, step=step)
+
+    if clust.master_process and args.figures:
+        example_path = out_dir / "figures" / f"val_examples_{step:06d}.png"
+        plot_examples(tokenizer, fname=example_path, **examples)
+
+        if args.wandb:
+            wandb.log(
+                {"figs": {"val_examples": wandb.Image(str(example_path))}}, step=step
+            )
+
+        plt.close("all")
 
     return loss_m.avg
 
