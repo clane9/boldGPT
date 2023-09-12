@@ -42,7 +42,7 @@ class MaskedPatchify(nn.Module):
         )
 
         # Patchified mask
-        patch_mask = mask.expand(1, -1, -1)
+        patch_mask = mask[None, ...]
         patch_mask = self.pad(patch_mask)
         patch_mask = self.to_patches(patch_mask).squeeze(0)
         self.num_total_patches = len(patch_mask)
@@ -55,6 +55,13 @@ class MaskedPatchify(nn.Module):
         self.register_buffer("mask", mask)
         self.register_buffer("patch_mask", patch_mask)
         self.register_buffer("patch_indices", patch_indices)
+
+    @property
+    def interior_mask(self) -> torch.Tensor:
+        """
+        Mask of patches contained in the mask interior.
+        """
+        return torch.all(self.patch_mask, dim=-1)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         """

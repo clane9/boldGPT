@@ -18,6 +18,9 @@ def test_patchify(mask: torch.Tensor, img: torch.Tensor):
     img2 = patchify.inverse(patches)
     assert torch.allclose(img, img2)
 
+    mask2 = patchify.inverse(patchify.patch_mask)
+    assert torch.allclose(mask, mask2)
+
 
 if __name__ == "__main__":
     pytest.main([__file__])

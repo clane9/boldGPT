@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from datasets import Dataset, load_dataset
@@ -42,13 +42,15 @@ def load_nsd_flat_splits() -> Dict[str, torch.Tensor]:
 
 def load_nsd_flat(
     keep_in_memory: bool = False,
+    columns: Optional[List[str]] = ["subject_id", "nsd_id", "activity"],
 ) -> Tuple[Dict[str, Dataset], torch.Tensor]:
     """
     Load NSD-Flat train/val dataset splits. Optionally keep in memory. Returns a
     dictionary mapping split names to datasets and a mask of pixels with fMRI data.
     """
     ds = load_dataset("clane9/NSD-Flat", split="train", keep_in_memory=keep_in_memory)
-    ds = ds.select_columns(["subject_id", "activity"])
+    if columns:
+        ds = ds.select_columns(columns)
     ds.set_format("torch")
 
     split_indices_map = load_nsd_flat_splits()

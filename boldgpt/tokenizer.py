@@ -35,8 +35,6 @@ class BoldTokenizer(nn.Module):
         self.ordering = ordering
 
         self.patchify = MaskedPatchify(mask, patch_size=patch_size)
-        self.num_patches = self.patchify.num_patches
-        self.dim = self.patchify.dim
 
         if ordering == "raster":
             default_order = torch.arange(self.num_patches)
@@ -53,14 +51,39 @@ class BoldTokenizer(nn.Module):
         self.register_buffer("default_order", default_order)
         self.register_buffer("default_ranking", torch.argsort(default_order))
 
+    @property
+    def mask(self) -> torch.Tensor:
+        return self.patchify.mask
+
+    @property
+    def num_patches(self) -> int:
+        return self.patchify.num_patches
+
+    @property
+    def dim(self) -> int:
+        return self.patchify.dim
+
+    @property
+    def patch_mask(self) -> torch.Tensor:
+        """
+        Patch mask with patches in the default order.
+        """
+        return self.patchify.patch_mask[self.default_order]
+
+    @property
+    def interior_mask(self) -> torch.Tensor:
+        """
+        Mask of patches contained in the mask interior, in the default order.
+        """
+        return self.patchify.interior_mask[self.default_order]
+
     def fit(self, images: torch.Tensor):
         """
         Fit vocabulary to images by k-means.
         """
         patches = self.patchify(images)
         # Only fit on patches in the mask interior
-        interior_mask = torch.all(self.patchify.patch_mask, dim=1)
-        patches = patches[:, interior_mask]
+        patches = patches[:, self.patchify.interior_mask]
         patches = patches.flatten(0, 1)
 
         kmeans = MiniBatchKMeans(n_clusters=self.vocab_size, n_init="auto")
@@ -132,6 +155,12 @@ class BoldTokenizer(nn.Module):
         dist_patches = torch.median(dist_patches, dim=1)[0]
         order = torch.argsort(dist_patches)
         return order
+
+    def load_vocab(self, vocab: torch.Tensor):
+        """
+        Load learned kmeans vocabulary.
+        """
+        self.vocab.copy_(vocab)
 
     def extra_repr(self) -> str:
         return f"vocab_size={self.vocab_size}, ordering={self.ordering}"
