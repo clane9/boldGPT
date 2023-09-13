@@ -28,7 +28,8 @@ pip install -e .
   - [ ] PCA masked patch prediction
 - [x] Implement model
   - [x] [`BoldGPT`](boldgpt/model.py) supporting causal/cross attention, masking, and shuffled prediction. Borrows elements from [timm](https://github.com/huggingface/pytorch-image-models/blob/main/timm/models/vision_transformer.py), [nanoGPT](https://github.com/karpathy/nanoGPT), and [BEiT](https://github.com/microsoft/unilm/blob/master/beit/modeling_pretrain.py).
-- [ ] Implement train and inference scripts
+- [x] Implement training script
+  - [x] [`train_gpt.py`](scripts/train_gpt.py) for training models on shuffled next patch prediction.
 - [ ] Train models
 - [ ] Evaluate masked patch prediction
 - [ ] Generate pretty brain maps
