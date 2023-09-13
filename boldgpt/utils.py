@@ -97,7 +97,10 @@ def seed_hash(*args):
 
 
 def setup_logging(
-    level: str = "INFO", path: Optional[Path] = None, rank: Optional[int] = None
+    level: str = "INFO",
+    path: Optional[Path] = None,
+    stdout: bool = True,
+    rank: Optional[int] = None,
 ):
     """
     Setup root logger.
@@ -115,10 +118,11 @@ def setup_logging(
         logger.removeHandler(h)
     logger.root.handlers = []
 
-    stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setFormatter(formatter)
-    stream_handler.setLevel(level)
-    logger.addHandler(stream_handler)
+    if stdout:
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setFormatter(formatter)
+        stream_handler.setLevel(level)
+        logger.addHandler(stream_handler)
 
     if path:
         file_handler = logging.FileHandler(path, mode="a")

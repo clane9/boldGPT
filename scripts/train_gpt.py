@@ -19,7 +19,6 @@ from typing import Callable, Dict, List, Optional, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
-import wandb
 import yaml
 from hf_argparser import HfArg, HfArgumentParser
 from matplotlib import pyplot as plt
@@ -30,6 +29,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 
+import wandb
 from boldgpt import create_model, list_models
 from boldgpt.data import ActivityTransform, load_nsd_flat
 from boldgpt.model import BoldGPT
@@ -60,10 +60,10 @@ class Args:
     )
     patch_size: int = HfArg(aliases=["--ps"], default=10, help="input patch size")
     vocab_size: int = HfArg(
-        aliases=["--vs"], default=4096, help="visual token vocab size"
+        aliases=["--vs"], default=1024, help="visual token vocab size"
     )
     vocab_samples: int = HfArg(
-        aliases=["--vss"], default=1000, help="num vocab training samples"
+        aliases=["--vss"], default=4000, help="num vocab training samples"
     )
     vocab_state: Optional[str] = HfArg(
         aliases=["--vst"], default=None, help="tokenizer vocab state to load"
@@ -88,23 +88,23 @@ class Args:
     )
     drop_path_rate: float = HfArg(aliases=["--dpr"], default=0.0, help="drop path rate")
     # Optimization
-    epochs: int = HfArg(default=10, help="number of epochs")
-    batch_size: int = HfArg(aliases=["--bs"], default=512, help="batch size")
-    lr: float = HfArg(default=1e-3, help="learning rate")
-    decay_lr: bool = HfArg(default=True, help="decay learning rate")
-    warmup_fraction: float = HfArg(
-        default=0.05, help="number of warmup steps as a fraction of total"
+    epochs: int = HfArg(default=1000, help="number of epochs")
+    batch_size: int = HfArg(
+        aliases=["--bs"], default=256, help="batch size per replica"
     )
+    lr: float = HfArg(default=3e-4, help="learning rate")
+    decay_lr: bool = HfArg(default=True, help="decay learning rate")
+    warmup_steps: float = HfArg(default=2000, help="number of warmup steps")
     min_lr_fraction: float = HfArg(
         default=0.05, help="minimum lr as a fraction of max lr"
     )
-    weight_decay: float = HfArg(aliases=["--wd"], default=0.8, help="weight decay")
+    weight_decay: float = HfArg(aliases=["--wd"], default=0.05, help="weight decay")
     beta1: float = HfArg(default=0.9, help="AdamW beta1")
-    beta2: float = HfArg(default=0.99, help="AdamW beta2")
+    beta2: float = HfArg(default=0.95, help="AdamW beta2")
     grad_accum_steps: int = HfArg(
         aliases=["--accum"], default=1, help="number of gradient accumulation steps"
     )
-    clip_grad: Optional[float] = HfArg(default=None, help="gradient norm clipping")
+    clip_grad: Optional[float] = HfArg(default=1.0, help="gradient norm clipping")
     # Logistics
     checkpoint: Optional[str] = HfArg(
         aliases=["--ckpt"], default=None, help="checkpoint to load"
@@ -162,9 +162,9 @@ def main(args: Args):
 
     log_path = out_dir / "logs" / f"log-{clust.rank:02d}.txt"
     log_path.parent.mkdir(exist_ok=True)
-    setup_logging(path=log_path, rank=clust.rank)
+    setup_logging(path=log_path, stdout=clust.master_process, rank=clust.rank)
 
-    # Wandb
+    # Wandb setup
     if clust.master_process and args.wandb and not args.sweep:
         wandb.init(project=PROJECT, name=name, config=args.__dict__)
 
@@ -281,14 +281,14 @@ def main(args: Args):
         start_epoch = 0
         best_metric = float("inf")
 
+    if clust.ddp:
+        model = DDP(model, device_ids=[clust.local_rank])
+
+    # Compile after ddp for more optimizations
     if args.compile:
         assert hasattr(torch, "compile"), "PyTorch >= 2.0 required for torch.compile"
         logging.info("Compiling the model")
         model = torch.compile(model)
-
-    # TODO: when should the model be converted to ddp?
-    if clust.ddp:
-        model = DDP(model, device_ids=[clust.local_rank])
 
     best_epoch = start_epoch
     epoch_steps = math.ceil(len(loaders["train"]) / args.grad_accum_steps)
@@ -735,7 +735,11 @@ def update_lr(
     Adapted from: https://github.com/karpathy/nanoGPT
     """
     total_steps = args.epochs * epoch_steps
-    warmup_steps = int(args.warmup_fraction * total_steps)
+    if args.warmup_steps > total_steps:
+        logging.warning(
+            f"warmup_steps ({args.warmup_steps}) greater than total steps {total_steps}"
+        )
+    warmup_steps = min(args.warmup_steps, total_steps)
     min_lr = args.min_lr_fraction * args.lr
 
     # Linear warmup
