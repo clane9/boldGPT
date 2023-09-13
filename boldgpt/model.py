@@ -195,6 +195,7 @@ class BoldGPT(nn.Module):
         mlp_ratio: float = 4.0,
         with_cross: bool = False,
         is_decoder: bool = True,
+        is_masked: bool = False,
         drop_rate: float = 0.0,
         sub_drop_rate: float = 0.0,
         proj_drop_rate: float = 0.0,
@@ -208,16 +209,22 @@ class BoldGPT(nn.Module):
         self.num_classes = num_classes
         self.embed_dim = embed_dim
         self.is_decoder = is_decoder
+        self.is_masked = is_masked
 
         self.patch_embed = nn.Linear(in_features, embed_dim)
 
-        self.mask_token = nn.Parameter(torch.empty(1, 1, embed_dim))
         self.group_token = nn.Parameter(torch.empty(1, 1, embed_dim))
         self.sub_embed = nn.Parameter(torch.empty(num_subs, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.empty(num_patches, embed_dim))
         self.next_pos_query = nn.Parameter(torch.empty(num_patches, embed_dim))
         self.eos_query = nn.Parameter(torch.empty(1, embed_dim))
         self.sub_drop = TokenDropout(p=sub_drop_rate)
+        # Only define mask_token if it's needed. Otherwise, it receives no grads and
+        # complicates DDP.
+        if is_masked:
+            self.mask_token = nn.Parameter(torch.empty(1, 1, embed_dim))
+        else:
+            self.register_parameter("mask_token", None)
 
         # stochastic depth decay rule
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
@@ -247,7 +254,8 @@ class BoldGPT(nn.Module):
         self.init_weights()
 
     def init_weights(self):
-        trunc_normal_(self.mask_token, std=0.02)
+        if self.is_masked:
+            trunc_normal_(self.mask_token, std=0.02)
         nn.init.normal_(self.group_token, std=1e-6)
         trunc_normal_(self.sub_embed, std=0.02)
         trunc_normal_(self.pos_embed, std=0.02)
@@ -263,6 +271,7 @@ class BoldGPT(nn.Module):
 
     def _mask_pos(self, x: torch.Tensor, bool_masked_pos: torch.Tensor) -> torch.Tensor:
         # token masking following BEiT
+        assert self.is_masked, "model must have is_masked=True"
         B, N, _ = x.shape
         mask_token = self.mask_token.expand(B, N, -1)
 
@@ -391,6 +400,7 @@ def _create_bold_gpt(
     mlp_ratio: float = 4.0,
     with_cross: bool = False,
     is_decoder: bool = True,
+    is_masked: bool = False,
     drop_rate: float = 0.0,
     sub_drop_rate: float = 0.0,
     proj_drop_rate: float = 0.0,
@@ -412,6 +422,7 @@ def _create_bold_gpt(
         mlp_ratio=mlp_ratio,
         with_cross=with_cross,
         is_decoder=is_decoder,
+        is_masked=is_masked,
         drop_rate=drop_rate,
         sub_drop_rate=sub_drop_rate,
         proj_drop_rate=proj_drop_rate,

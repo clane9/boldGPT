@@ -7,7 +7,7 @@ from datasets import Dataset, load_dataset
 from .utils import generate_splits
 
 NUM_SAMPLES = 195000
-SPLIT_SIZES = {"train": 0.85, "val": 0.15}
+SPLIT_SIZES = {"train": 0.95, "val": 0.05}
 SPLIT_SEED = 42
 
 

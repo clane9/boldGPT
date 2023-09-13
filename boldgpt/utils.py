@@ -79,9 +79,7 @@ def generate_splits(
     rng = np.random.default_rng(seed)
     indices = rng.permutation(num_samples)
 
-    splits = [
-        np.sort(indices[start:end]) for start, end in zip(split_starts, split_ends)
-    ]
+    splits = [indices[start:end] for start, end in zip(split_starts, split_ends)]
     return splits
 
 

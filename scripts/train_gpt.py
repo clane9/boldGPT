@@ -48,9 +48,6 @@ NUM_EXAMPLES = 10
 CKPT_INTERVAL = 5
 MAX_CKPTS = 5
 
-SPLITS = {"train": 0.85, "val": 0.15}
-SPLIT_SEED = 42
-
 
 @dataclass
 class Args:
@@ -221,6 +218,7 @@ def main(args: Args):
             num_workers=args.workers,
             pin_memory=clust.use_cuda,
             collate_fn=Collate(transform),
+            drop_last=True,  # helpful for torch.compile
         )
 
     # Tokenizer
