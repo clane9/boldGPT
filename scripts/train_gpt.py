@@ -507,7 +507,7 @@ def train(
             examples["order"] = order[:NUM_EXAMPLES] if args.shuffle else None
 
         if (step % LOG_INTERVAL == 0 and need_update) or is_last_batch or args.debug:
-            tput = args.batch_size / step_time_m.avg
+            tput = (clust.world_size * args.batch_size) / step_time_m.avg
             if clust.use_cuda:
                 alloc_mem_gb = torch.cuda.max_memory_allocated() / 1e9
                 res_mem_gb = torch.cuda.max_memory_reserved() / 1e9
@@ -620,7 +620,7 @@ def validate(
             or batch_idx + 1 == epoch_batches
             or args.debug
         ):
-            tput = args.batch_size / step_time_m.avg
+            tput = (clust.world_size * args.batch_size) / step_time_m.avg
             if clust.use_cuda:
                 alloc_mem_gb = torch.cuda.max_memory_allocated() / 1e9
                 res_mem_gb = torch.cuda.max_memory_reserved() / 1e9
