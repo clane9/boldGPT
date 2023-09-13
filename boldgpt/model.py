@@ -380,12 +380,15 @@ class BoldGPT(nn.Module):
         return keys
 
 
-@register_model("boldgpt_base")
-def boldgpt_base(
+def _create_bold_gpt(
     num_patches: int,
     in_features: int,
     num_subs: int = 1024,
     num_classes: int = 4096,
+    embed_dim: int = 768,
+    depth: int = 12,
+    num_heads: int = 12,
+    mlp_ratio: float = 4.0,
     with_cross: bool = False,
     is_decoder: bool = True,
     drop_rate: float = 0.0,
@@ -403,9 +406,10 @@ def boldgpt_base(
         in_features=in_features,
         num_subs=num_subs,
         num_classes=num_classes,
-        embed_dim=768,
-        depth=12,
-        num_heads=12,
+        embed_dim=embed_dim,
+        depth=depth,
+        num_heads=num_heads,
+        mlp_ratio=mlp_ratio,
         with_cross=with_cross,
         is_decoder=is_decoder,
         drop_rate=drop_rate,
@@ -414,3 +418,24 @@ def boldgpt_base(
         attn_drop_rate=attn_drop_rate,
         drop_path_rate=drop_path_rate,
     )
+
+
+@register_model("boldgpt_tiny")
+def boldgpt_tiny(**kwargs):
+    model_kwargs = dict(embed_dim=192, depth=12, num_heads=3)
+    kwargs = {**kwargs, **model_kwargs}
+    return _create_bold_gpt(**kwargs)
+
+
+@register_model("boldgpt_small")
+def boldgpt_small(**kwargs):
+    model_kwargs = dict(embed_dim=384, depth=12, num_heads=6)
+    kwargs = {**kwargs, **model_kwargs}
+    return _create_bold_gpt(**kwargs)
+
+
+@register_model("boldgpt_base")
+def boldgpt_base(**kwargs):
+    model_kwargs = dict(embed_dim=768, depth=12, num_heads=12)
+    kwargs = {**kwargs, **model_kwargs}
+    return _create_bold_gpt(**kwargs)
