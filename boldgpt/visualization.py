@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
+from sklearn.metrics import r2_score
 
 from boldgpt.tokenizer import BoldTokenizer
 
@@ -28,8 +29,8 @@ def plot_examples(
         subid: subject IDs, (B,)
         nsdid: NSD stimulus IDs, (B,)
         activity: activity maps, (B, H, W)
-        tokens: discretized activity tokens, (B, N)
-        pred: predicted tokens, (B, N)
+        tokens: (unshuffled) discretized activity tokens, (B, N)
+        pred: (unshuffled) predicted tokens, (B, N)
         order: per-sample token order, (B, N)
         fname: output figure filename
 
@@ -42,24 +43,42 @@ def plot_examples(
     assert order is None or order.ndim == 2, "Invalid order shape"
 
     B = activity.shape[0]
+    device = activity.device
 
-    activity = activity.cpu()
-    tokens = tokens.cpu()
     if pred is not None:
-        pred = pred.detach().cpu()
-    if order is not None:
-        order = order.cpu()
-    else:
-        order = torch.arange(tokenizer.num_patches).expand(B, -1)
-
-    mask = tokenizer.patchify.mask.numpy()
-    subid = subid.numpy()
-    nsdid = nsdid.numpy()
+        pred = pred.detach()
+    if order is None:
+        order = torch.arange(tokenizer.num_patches, device=device).expand(B, -1)
 
     tokens = tokenizer.inverse(tokens)
     if pred is not None:
         pred = tokenizer.inverse(pred)
     order = inverse_order(tokenizer, order)
+
+    mask = tokenizer.mask
+    activity = mask * activity
+    tokens = mask * tokens
+    if pred is not None:
+        pred = mask * pred
+
+    activity = activity.cpu().numpy()
+    tokens = tokens.cpu().numpy()
+    if pred is not None:
+        pred = pred.cpu().numpy()
+    order = order.cpu().numpy()
+    mask = mask.cpu().numpy()
+    subid = subid.cpu().numpy()
+    nsdid = nsdid.cpu().numpy()
+
+    token_r2 = r2_score(
+        activity.reshape(B, -1).T, tokens.reshape(B, -1).T, multioutput="raw_values"
+    )
+    if pred is not None:
+        pred_r2 = r2_score(
+            activity.reshape(B, -1).T, pred.reshape(B, -1).T, multioutput="raw_values"
+        )
+    else:
+        pred_r2 = None
 
     plotw = 3.0
     ploth = 3.5
@@ -91,6 +110,15 @@ def plot_examples(
         plt.text(
             0.5, 0.98, "Tokens", ha="center", va="top", transform=tform, **textdict
         )
+        plt.text(
+            0.98,
+            0.0,
+            f"r2={token_r2[ii]:.3f}",
+            ha="right",
+            va="bottom",
+            transform=tform,
+            **textdict,
+        )
 
         if pred is not None:
             plt.sca(axs[ii, 3])
@@ -98,6 +126,15 @@ def plot_examples(
             show_img(mask, pred[ii])
             plt.text(
                 0.5, 0.98, "Pred", ha="center", va="top", transform=tform, **textdict
+            )
+            plt.text(
+                0.98,
+                0.0,
+                f"r2={pred_r2[ii]:.3f}",
+                ha="right",
+                va="bottom",
+                transform=tform,
+                **textdict,
             )
 
     plt.tight_layout(pad=0.2, h_pad=0.05)
