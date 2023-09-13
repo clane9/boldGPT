@@ -14,7 +14,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -148,16 +148,21 @@ def main(args: Args):
 
     # Creating output dir
     overwritten = False
-    if out_dir.exists():
+    if clust.master_process and out_dir.exists():
         if args.overwrite:
             overwritten = True
-            if clust.master_process:
-                shutil.rmtree(out_dir)
+            shutil.rmtree(out_dir)
         else:
             raise FileExistsError(f"Output directory {out_dir} already exists")
     if clust.master_process:
         out_dir.mkdir(parents=True)
-    setup_logging(out_dir, master_process=clust.master_process)
+    else:
+        while not out_dir.exists():
+            time.sleep(0.1)
+
+    log_path = out_dir / "logs" / f"log-{clust.rank:02d}.txt"
+    log_path.parent.mkdir(exist_ok=True)
+    setup_logging(path=log_path, rank=clust.rank)
 
     # Wandb
     if clust.master_process and args.wandb and not args.sweep:
@@ -245,7 +250,8 @@ def main(args: Args):
         tokenizer.fit(sample_activity)
         logging.info("Vocab[:3, :5]: %s", tokenizer.vocab[:3, :5])
 
-    torch.save(tokenizer.state_dict(), out_dir / "tok_state.pt")
+    if clust.master_process:
+        torch.save(tokenizer.state_dict(), out_dir / "tok_state.pt")
     tokenizer = tokenizer.to(clust.device)
 
     # Model and optimizer
@@ -265,14 +271,6 @@ def main(args: Args):
     logging.info("%s", model)
     logging.info("Params: %.0fM", sum(p.numel() for p in model.parameters()) / 1e6)
 
-    if clust.ddp:
-        model = DDP(model, device_ids=[clust.local_rank])
-
-    if args.compile:
-        assert hasattr(torch, "compile"), "PyTorch >= 2.0 required for torch.compile"
-        logging.info("Compiling the model")
-        model = torch.compile(model)
-
     optimizer = create_optimizer(args, model)
 
     # Load checkpoint
@@ -282,6 +280,15 @@ def main(args: Args):
     else:
         start_epoch = 0
         best_metric = float("inf")
+
+    if args.compile:
+        assert hasattr(torch, "compile"), "PyTorch >= 2.0 required for torch.compile"
+        logging.info("Compiling the model")
+        model = torch.compile(model)
+
+    # TODO: when should the model be converted to ddp?
+    if clust.ddp:
+        model = DDP(model, device_ids=[clust.local_rank])
 
     best_epoch = start_epoch
     epoch_steps = math.ceil(len(loaders["train"]) / args.grad_accum_steps)
@@ -451,7 +458,7 @@ def train(
             logits = model(patches, sub_indices, order=order)
             loss = F.cross_entropy(logits.flatten(0, 1), tokens.flatten())
         if clust.ddp:
-            loss_item = reduce_tensor(loss.detach()).item()
+            loss_item = reduce_tensor(loss.detach(), clust.world_size).item()
         else:
             loss_item = loss.item()
         if accum_steps > 1:
@@ -543,7 +550,7 @@ def train(
             break
 
     if clust.master_process and args.figures:
-        example_path = out_dir / "figures" / f"train_examples_{step:06d}.png"
+        example_path = out_dir / "figures" / f"train_examples-{epoch:04d}.png"
         example_path.parent.mkdir(exist_ok=True)
         plot_examples(tokenizer, fname=example_path, **examples)
 
@@ -590,7 +597,7 @@ def validate(
         logits = model(patches, sub_indices)
         loss = F.cross_entropy(logits.flatten(0, 1), tokens.flatten())
         if clust.ddp:
-            loss_item = reduce_tensor(loss.detach()).item()
+            loss_item = reduce_tensor(loss.detach(), clust.world_size).item()
         else:
             loss_item = loss.item()
 
@@ -652,7 +659,7 @@ def validate(
             wandb.log({"val": record}, step=step)
 
     if clust.master_process and args.figures:
-        example_path = out_dir / "figures" / f"val_examples_{step:06d}.png"
+        example_path = out_dir / "figures" / f"val_examples-{epoch:04d}.png"
         plot_examples(tokenizer, fname=example_path, **examples)
 
         if args.wandb:
@@ -688,10 +695,13 @@ def save_checkpoint(
     epoch: int,
     metric: float,
     is_best: bool,
-    model: BoldGPT,
+    model: Union[DDP, BoldGPT],
     optimizer: torch.optim.Optimizer,
     out_dir: Path,
 ):
+    if isinstance(model, DDP):
+        model = model.module
+
     state = {
         "epoch": epoch,
         "metric": metric,

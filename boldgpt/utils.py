@@ -97,12 +97,15 @@ def seed_hash(*args):
 
 
 def setup_logging(
-    out_dir: Optional[Path] = None, master_process: bool = True, level: str = "INFO"
+    level: str = "INFO", path: Optional[Path] = None, rank: Optional[int] = None
 ):
     """
     Setup root logger.
     """
-    fmt = "[%(levelname)s %(asctime)s %(lineno)4d]: %(message)s"
+    if rank is not None:
+        fmt = f"[%(levelname)s %(asctime)s {rank:>3d}]: %(message)s"
+    else:
+        fmt = "[%(levelname)s %(asctime)s]: %(message)s"
     formatter = logging.Formatter(fmt, datefmt="%y-%m-%d %H:%M:%S")
 
     logger = logging.getLogger()
@@ -117,9 +120,8 @@ def setup_logging(
     stream_handler.setLevel(level)
     logger.addHandler(stream_handler)
 
-    if out_dir and master_process:
-        log_path = out_dir / "log.txt"
-        file_handler = logging.FileHandler(log_path, mode="a")
+    if path:
+        file_handler = logging.FileHandler(path, mode="a")
         file_handler.setFormatter(formatter)
         file_handler.setLevel(level)
         logger.addHandler(file_handler)
