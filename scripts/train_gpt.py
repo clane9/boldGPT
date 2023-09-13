@@ -733,7 +733,7 @@ def update_lr(
     Adapted from: https://github.com/karpathy/nanoGPT
     """
     total_steps = args.epochs * epoch_steps
-    if args.warmup_steps > total_steps:
+    if step == 0 and args.warmup_steps > total_steps:
         logging.warning(
             f"warmup_steps ({args.warmup_steps}) greater than total steps {total_steps}"
         )
