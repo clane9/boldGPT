@@ -717,7 +717,7 @@ def save_checkpoint(
 
     ckpt_last = ckpt_dir / "ckpt-last.pt"
     ckpt_last.unlink(missing_ok=True)
-    ckpt_last.symlink_to(ckpt_path)
+    ckpt_last.symlink_to(ckpt_path.name)
 
     if is_best:
         ckpt_best = ckpt_dir / "ckpt-best.pt"
