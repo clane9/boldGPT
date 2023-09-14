@@ -677,7 +677,11 @@ def load_checkpoint(
     device: torch.device,
 ):
     state = torch.load(args.checkpoint, map_location=device)
-    model.load_state_dict(state["model"])
+    # Remove prefix from DDP if present
+    model_state = {
+        k.removeprefix("_orig_mod.module."): v for k, v in state["model"].items()
+    }
+    model.load_state_dict(model_state)
 
     if not args.restart:
         optimizer.load_state_dict(state["optimizer"])
