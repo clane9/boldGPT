@@ -7,7 +7,7 @@ Humans struggle to "see" the structure in functional MRI (BOLD) brain maps. Our 
 ## Roadmap
 
 - [x] Prepare the [natural scenes dataset](https://naturalscenesdataset.org/) for GPT consumption
-  - [x] NSD "beta" activity vectors to flat maps ([NSD-Flat](nsd_flat), [🤗](https://huggingface.co/datasets/clane9/NSD-Flat))
+  - [x] NSD "beta" activity vectors to flat maps ([NSD-Flat](https://github.com/clane9/NSD-Flat), [🤗](https://huggingface.co/datasets/clane9/NSD-Flat))
   - [x] Flat maps to tokenized patch sequences ([`BoldTokenizer`](boldgpt/tokenizer.py)) supporting raster, radial, and random order.
 - [x] Implement model
   - [x] [`BoldGPT`](boldgpt/model.py) supporting causal/cross attention, masking, and shuffled prediction. Borrows elements from [timm](https://github.com/huggingface/pytorch-image-models/blob/main/timm/models/vision_transformer.py), [nanoGPT](https://github.com/karpathy/nanoGPT), and [BEiT](https://github.com/microsoft/unilm/blob/master/beit/modeling_pretrain.py).
@@ -16,8 +16,10 @@ Humans struggle to "see" the structure in functional MRI (BOLD) brain maps. Our 
 - [ ] Train models
   - [x] [Initial training run](jobs/train_boldgpt_01) with ViT-small, shuffled next patch prediction with discrete token targets, 1000 epochs.
 - [ ] Implement benchmarks
+  - [ ] Masked patch prediction
   - [ ] Patch-wise object classification (i.e. segmentation)
-- [ ] Implement baselines
+  - [ ] [image-to-activity](https://codalab.lisn.upsaclay.fr/competitions/9304)
+  - [ ] [activity-to-image](https://github.com/MedARC-AI/fMRI-reconstruction-NSD)
 - [ ] Evaluation
 - [ ] Generate pretty brain maps
 
