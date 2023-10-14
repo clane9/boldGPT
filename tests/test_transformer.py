@@ -3,11 +3,12 @@ import logging
 import pytest
 import torch
 
-from boldgpt.model import BoldGPT
+from boldgpt.models.transformer import Transformer
 
 
 def test_boldgpt():
-    model = BoldGPT(
+    # Small model with all bells and whistles
+    model = Transformer(
         num_patches=100,
         in_features=64,
         num_subs=1024,
@@ -15,8 +16,10 @@ def test_boldgpt():
         embed_dim=192,
         depth=4,
         num_heads=3,
-        is_decoder=True,
+        with_next_pos=True,
         with_cross=True,
+        is_causal=True,
+        is_masked=True,
         drop_rate=0.2,
         sub_drop_rate=0.2,
         proj_drop_rate=0.2,
@@ -38,7 +41,12 @@ def test_boldgpt():
     )
     assert y.shape == (16, 100, 512)
 
-    logging.info("No decay params:\n%s", model.nodecay_keys())
+    no_decay_keys = set(model.no_decay_keys())
+    decay_keys = [
+        name for name, _ in model.named_parameters() if name not in no_decay_keys
+    ]
+    logging.info("No decay keys:\n%s", list(no_decay_keys))
+    logging.info("Decay keys:\n%s", list(decay_keys))
 
 
 if __name__ == "__main__":

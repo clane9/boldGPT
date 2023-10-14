@@ -370,13 +370,13 @@ class Collate(torch.nn.Module):
 
 def create_optimizer(args: Args, model: BoldGPT) -> torch.optim.Optimizer:
     named_params = {name: p for name, p in model.named_parameters() if p.requires_grad}
-    nodecay_keys = set(model.nodecay_keys())
-    decay_params = [p for name, p in named_params.items() if name not in nodecay_keys]
-    nodecay_params = [p for name, p in named_params.items() if name in nodecay_keys]
+    no_decay_keys = set(model.no_decay_keys())
+    decay_params = [p for name, p in named_params.items() if name not in no_decay_keys]
+    no_decay_params = [p for name, p in named_params.items() if name in no_decay_keys]
 
     optim_groups = [
         {"params": decay_params, "weight_decay": args.weight_decay},
-        {"params": nodecay_params, "weight_decay": 0.0},
+        {"params": no_decay_params, "weight_decay": 0.0},
     ]
     optimizer = torch.optim.AdamW(
         optim_groups, lr=args.lr, betas=(args.beta1, args.beta2)

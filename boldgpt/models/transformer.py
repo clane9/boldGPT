@@ -182,7 +182,7 @@ class TokenDropout(nn.Dropout1d):
         return output
 
 
-class BoldGPT(nn.Module):
+class Transformer(nn.Module):
     def __init__(
         self,
         num_patches: int,
@@ -193,8 +193,9 @@ class BoldGPT(nn.Module):
         depth: int = 12,
         num_heads: int = 12,
         mlp_ratio: float = 4.0,
+        with_next_pos: bool = True,
         with_cross: bool = False,
-        is_decoder: bool = True,
+        is_causal: bool = True,
         is_masked: bool = False,
         drop_rate: float = 0.0,
         sub_drop_rate: float = 0.0,
@@ -208,7 +209,9 @@ class BoldGPT(nn.Module):
         self.num_subs = num_subs
         self.num_classes = num_classes
         self.embed_dim = embed_dim
-        self.is_decoder = is_decoder
+        self.with_next_pos = with_next_pos
+        self.with_cross = with_cross
+        self.is_causal = is_causal
         self.is_masked = is_masked
 
         self.patch_embed = nn.Linear(in_features, embed_dim)
@@ -216,11 +219,12 @@ class BoldGPT(nn.Module):
         self.group_token = nn.Parameter(torch.empty(1, 1, embed_dim))
         self.sub_embed = nn.Parameter(torch.empty(num_subs, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.empty(num_patches, embed_dim))
-        self.next_pos_query = nn.Parameter(torch.empty(num_patches, embed_dim))
+        if with_next_pos:
+            self.next_pos_query = nn.Parameter(torch.empty(num_patches, embed_dim))
+        else:
+            self.register_parameter("next_pos_query", None)
         self.eos_query = nn.Parameter(torch.empty(1, embed_dim))
         self.sub_drop = TokenDropout(p=sub_drop_rate)
-        # Only define mask_token if it's needed. Otherwise, it receives no grads and
-        # complicates DDP.
         if is_masked:
             self.mask_token = nn.Parameter(torch.empty(1, 1, embed_dim))
         else:
@@ -256,10 +260,11 @@ class BoldGPT(nn.Module):
     def init_weights(self):
         if self.is_masked:
             trunc_normal_(self.mask_token, std=0.02)
-        nn.init.normal_(self.group_token, std=1e-6)
+        nn.init.zeros_(self.group_token)
         trunc_normal_(self.sub_embed, std=0.02)
         trunc_normal_(self.pos_embed, std=0.02)
-        trunc_normal_(self.next_pos_query, std=0.02)
+        if self.with_next_pos:
+            trunc_normal_(self.next_pos_query, std=0.02)
         trunc_normal_(self.eos_query, std=0.02)
         self.apply(self._init_weights)
 
@@ -286,6 +291,9 @@ class BoldGPT(nn.Module):
         sub_indices: Optional[torch.Tensor] = None,
         order: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert (
+            order is None or self.with_next_pos
+        ), "Must set with_next_pos=True for non-default patch order"
         B = x.size(0)
 
         # learned position encoding
@@ -304,13 +312,14 @@ class BoldGPT(nn.Module):
         x = torch.cat([sub_token, x], dim=1)
 
         # learned next position query (for shuffled orders)
-        next_pos_query = self.next_pos_query
-        if order is not None:
-            next_pos_query = next_pos_query[order]
-        next_pos_query = next_pos_query.expand(B, -1, -1)
-        eos_query = self.eos_query.expand(B, -1, -1)
-        next_pos_query = torch.cat([next_pos_query, eos_query], dim=1)
-        x = x + next_pos_query
+        if self.with_next_pos:
+            next_pos_query = self.next_pos_query
+            if order is not None:
+                next_pos_query = next_pos_query[order]
+            next_pos_query = next_pos_query.expand(B, -1, -1)
+            eos_query = self.eos_query.expand(B, -1, -1)
+            next_pos_query = torch.cat([next_pos_query, eos_query], dim=1)
+            x = x + next_pos_query
         return x
 
     def forward_features(
@@ -328,7 +337,7 @@ class BoldGPT(nn.Module):
         x = self._pos_embed(x, sub_indices, order)
 
         for block in self.blocks:
-            x = block(x, context=context, is_causal=self.is_decoder)
+            x = block(x, context=context, is_causal=self.is_causal)
 
         x = self.norm(x)
         return x
@@ -366,7 +375,7 @@ class BoldGPT(nn.Module):
         x = self.forward_head(x)[:, :-1]
         return x
 
-    def nodecay_keys(self) -> List[str]:
+    def no_decay_keys(self) -> List[str]:
         """
         Return a list of parameter names that should not be weight decayed.
         """
@@ -388,6 +397,12 @@ class BoldGPT(nn.Module):
         ]
         return keys
 
+    def extra_repr(self) -> str:
+        return (
+            f"with_next_pos={self.with_next_pos}, with_cross={self.with_cross}, "
+            f"is_caual={self.is_causal}, is_masked={self.is_masked}"
+        )
+
 
 def _create_bold_gpt(
     num_patches: int,
@@ -398,9 +413,6 @@ def _create_bold_gpt(
     depth: int = 12,
     num_heads: int = 12,
     mlp_ratio: float = 4.0,
-    with_cross: bool = False,
-    is_decoder: bool = True,
-    is_masked: bool = False,
     drop_rate: float = 0.0,
     sub_drop_rate: float = 0.0,
     proj_drop_rate: float = 0.0,
@@ -411,7 +423,7 @@ def _create_bold_gpt(
     if kwargs:
         logging.warning("Extra unused kwargs: %s", kwargs)
 
-    return BoldGPT(
+    return Transformer(
         num_patches=num_patches,
         in_features=in_features,
         num_subs=num_subs,
@@ -420,9 +432,10 @@ def _create_bold_gpt(
         depth=depth,
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
-        with_cross=with_cross,
-        is_decoder=is_decoder,
-        is_masked=is_masked,
+        with_next_pos=True,
+        with_cross=False,
+        is_causal=True,
+        is_masked=False,
         drop_rate=drop_rate,
         sub_drop_rate=sub_drop_rate,
         proj_drop_rate=proj_drop_rate,
