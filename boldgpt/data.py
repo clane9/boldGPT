@@ -1,8 +1,12 @@
 from functools import lru_cache
-from typing import Dict, List, Optional, Tuple
+from importlib import resources
+from typing import Dict, List, Optional
 
+import numpy as np
 import torch
 from datasets import Dataset, load_dataset
+
+import boldgpt
 
 from .utils import generate_splits
 
@@ -40,10 +44,19 @@ def load_nsd_flat_splits() -> Dict[str, torch.Tensor]:
     return split_indices_map
 
 
+def load_nsd_flat_mask() -> torch.Tensor:
+    """
+    Load the NSD-Flat activity data mask. Returns a boolean tensor of shape (215, 200).
+    """
+    with (resources.files(boldgpt) / "nsd_flat_mask.npy").open("rb") as f:
+        mask = torch.from_numpy(np.load(f))
+    return mask
+
+
 def load_nsd_flat(
     keep_in_memory: bool = False,
     columns: Optional[List[str]] = ["subject_id", "nsd_id", "activity"],
-) -> Tuple[Dict[str, Dataset], torch.Tensor]:
+) -> Dict[str, Dataset]:
     """
     Load NSD-Flat train/val dataset splits. Optionally keep in memory. Returns a
     dictionary mapping split names to datasets and a mask of pixels with fMRI data.
@@ -59,8 +72,11 @@ def load_nsd_flat(
         for split, ind in split_indices_map.items()
     }
 
-    # mask of pixels with fMRI data
-    # missing data are coded as all 0
-    example_activity = ds[:100]["activity"]
-    mask = ~torch.all(example_activity == 127, dim=0)
-    return dsets, mask
+    return dsets
+
+
+def get_mask(activity: torch.Tensor):
+    """
+    Get the mask of pixels with fMRI data (not all zero across the first dimension).
+    """
+    return ~torch.all(activity == 127, dim=0)

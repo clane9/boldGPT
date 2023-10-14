@@ -19,6 +19,7 @@ from typing import Callable, Dict, List, Optional, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
+import wandb
 import yaml
 from hf_argparser import HfArg, HfArgumentParser
 from matplotlib import pyplot as plt
@@ -29,7 +30,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 
-import wandb
 from boldgpt import create_model, list_models
 from boldgpt.data import ActivityTransform, load_nsd_flat
 from boldgpt.model import BoldGPT
@@ -192,7 +192,7 @@ def main(args: Args):
 
     # Datasets and loaders
     logging.info("Loading NSD-Flat dataset")
-    dsets, mask = load_nsd_flat(args)
+    dsets, mask = load_nsd_flat(keep_in_memory=clust.device.type == "cuda")
     for split, ds in dsets.items():
         logging.info("%s samples: %d", split.capitalize(), len(ds))
     logging.info("Activity shape: %s", mask.shape)
