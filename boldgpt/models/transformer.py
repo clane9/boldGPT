@@ -1,12 +1,9 @@
-import logging
 from typing import Callable, List, Optional
 
 import torch
 import torch.nn.functional as F
 from timm.layers import DropPath, Mlp, trunc_normal_
 from torch import nn
-
-from .registry import register_model
 
 Layer = Callable[..., nn.Module]
 
@@ -193,6 +190,7 @@ class Transformer(nn.Module):
         depth: int = 12,
         num_heads: int = 12,
         mlp_ratio: float = 4.0,
+        with_sub_embed: bool = True,
         with_next_pos: bool = True,
         with_cross: bool = False,
         is_causal: bool = True,
@@ -209,6 +207,7 @@ class Transformer(nn.Module):
         self.num_subs = num_subs
         self.num_classes = num_classes
         self.embed_dim = embed_dim
+        self.with_sub_embed = with_sub_embed
         self.with_next_pos = with_next_pos
         self.with_cross = with_cross
         self.is_causal = is_causal
@@ -217,7 +216,10 @@ class Transformer(nn.Module):
         self.patch_embed = nn.Linear(in_features, embed_dim)
 
         self.group_token = nn.Parameter(torch.empty(1, 1, embed_dim))
-        self.sub_embed = nn.Parameter(torch.empty(num_subs, 1, embed_dim))
+        if with_sub_embed:
+            self.sub_embed = nn.Parameter(torch.empty(num_subs, 1, embed_dim))
+        else:
+            self.register_parameter("sub_embed", None)
         self.pos_embed = nn.Parameter(torch.empty(num_patches, embed_dim))
         if with_next_pos:
             self.next_pos_query = nn.Parameter(torch.empty(num_patches, embed_dim))
@@ -261,7 +263,8 @@ class Transformer(nn.Module):
         if self.is_masked:
             trunc_normal_(self.mask_token, std=0.02)
         nn.init.zeros_(self.group_token)
-        trunc_normal_(self.sub_embed, std=0.02)
+        if self.with_sub_embed:
+            trunc_normal_(self.sub_embed, std=0.02)
         trunc_normal_(self.pos_embed, std=0.02)
         if self.with_next_pos:
             trunc_normal_(self.next_pos_query, std=0.02)
@@ -294,6 +297,9 @@ class Transformer(nn.Module):
         assert (
             order is None or self.with_next_pos
         ), "Must set with_next_pos=True for non-default patch order"
+        assert (
+            sub_indices is None or self.with_sub_embed
+        ), "Must set with_sub_embed=True to use sub_indices"
         B = x.size(0)
 
         # learned position encoding
@@ -402,64 +408,3 @@ class Transformer(nn.Module):
             f"with_next_pos={self.with_next_pos}, with_cross={self.with_cross}, "
             f"is_caual={self.is_causal}, is_masked={self.is_masked}"
         )
-
-
-def _create_bold_gpt(
-    num_patches: int,
-    in_features: int,
-    num_subs: int = 1024,
-    num_classes: int = 4096,
-    embed_dim: int = 768,
-    depth: int = 12,
-    num_heads: int = 12,
-    mlp_ratio: float = 4.0,
-    drop_rate: float = 0.0,
-    sub_drop_rate: float = 0.0,
-    proj_drop_rate: float = 0.0,
-    attn_drop_rate: float = 0.0,
-    drop_path_rate: float = 0.0,
-    **kwargs,
-):
-    if kwargs:
-        logging.warning("Extra unused kwargs: %s", kwargs)
-
-    return Transformer(
-        num_patches=num_patches,
-        in_features=in_features,
-        num_subs=num_subs,
-        num_classes=num_classes,
-        embed_dim=embed_dim,
-        depth=depth,
-        num_heads=num_heads,
-        mlp_ratio=mlp_ratio,
-        with_next_pos=True,
-        with_cross=False,
-        is_causal=True,
-        is_masked=False,
-        drop_rate=drop_rate,
-        sub_drop_rate=sub_drop_rate,
-        proj_drop_rate=proj_drop_rate,
-        attn_drop_rate=attn_drop_rate,
-        drop_path_rate=drop_path_rate,
-    )
-
-
-@register_model("boldgpt_tiny")
-def boldgpt_tiny(**kwargs):
-    model_kwargs = dict(embed_dim=192, depth=12, num_heads=3)
-    kwargs = {**kwargs, **model_kwargs}
-    return _create_bold_gpt(**kwargs)
-
-
-@register_model("boldgpt_small")
-def boldgpt_small(**kwargs):
-    model_kwargs = dict(embed_dim=384, depth=12, num_heads=6)
-    kwargs = {**kwargs, **model_kwargs}
-    return _create_bold_gpt(**kwargs)
-
-
-@register_model("boldgpt_base")
-def boldgpt_base(**kwargs):
-    model_kwargs = dict(embed_dim=768, depth=12, num_heads=12)
-    kwargs = {**kwargs, **model_kwargs}
-    return _create_bold_gpt(**kwargs)

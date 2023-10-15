@@ -24,6 +24,7 @@ class MaskedPatchify(nn.Module):
     patch_mask: torch.Tensor
     patch_indices: torch.Tensor
     order: torch.Tensor
+    ranking: torch.Tensor
 
     def __init__(
         self,
@@ -95,6 +96,7 @@ class MaskedPatchify(nn.Module):
         self.register_buffer("patch_mask", patch_mask)
         self.register_buffer("patch_indices", patch_indices)
         self.register_buffer("order", order)
+        self.register_buffer("ranking", torch.argsort(order))
 
     @property
     def interior_mask(self) -> torch.Tensor:
@@ -109,12 +111,14 @@ class MaskedPatchify(nn.Module):
         patches = self.to_patches(images)
         return patches
 
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
+    def forward(self, images: torch.Tensor, apply_mask: bool = True) -> torch.Tensor:
         """
         Convert images, shape (B, H, W), to patches, shape (B, N, C).
         """
         patches = self.forward_raw(images)
         patches = patches[..., self.patch_indices, :]
+        if apply_mask:
+            patches = patches * self.patch_mask
         return patches
 
     def inverse(self, patches: torch.Tensor, apply_mask: bool = True) -> torch.Tensor:
