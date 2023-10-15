@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from datasets import Dataset, load_dataset
 
-import boldgpt
+import boldgpt.resources
 
 from .utils import generate_splits
 
@@ -48,7 +48,7 @@ def load_nsd_flat_mask() -> torch.Tensor:
     """
     Load the NSD-Flat activity data mask. Returns a boolean tensor of shape (215, 200).
     """
-    with (resources.files(boldgpt) / "nsd_flat_mask.npy").open("rb") as f:
+    with (resources.files(boldgpt.resources) / "nsd_flat_mask.npy").open("rb") as f:
         mask = torch.from_numpy(np.load(f))
     return mask
 

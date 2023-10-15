@@ -1,7 +1,3 @@
-"""
-Training script for BoldGPT.
-"""
-
 import json
 import logging
 import math
@@ -14,11 +10,10 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 import wandb
 import yaml
 from hf_argparser import HfArg, HfArgumentParser
@@ -30,16 +25,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 
-from boldgpt import create_model, list_models
-from boldgpt.data import ActivityTransform, load_nsd_flat
-from boldgpt.model import BoldGPT
-from boldgpt.tokenizer import BoldShuffle, BoldTokenizer
+from boldgpt.data import ActivityTransform, load_nsd_flat, load_nsd_flat_mask
+from boldgpt.models import BoldGPT, create_model, list_models
+from boldgpt.models.utils import get_no_decay_keys
 from boldgpt.utils import ClusterInfo, get_exp_name, get_sha, seed_hash, setup_logging
-from boldgpt.visualization import plot_examples
 
 np.set_printoptions(precision=3)
-
-Criterion = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 PROJECT = "boldgpt"
 
@@ -53,26 +44,24 @@ MAX_CKPTS = 5
 class Args:
     # Architecture
     model: str = HfArg(
-        default="boldgpt_base", help=f"model ({', '.join(list_models())})"
+        default="boldgpt_small_patch10", help=f"model ({', '.join(list_models())})"
     )
-    patch_size: int = HfArg(aliases=["--ps"], default=10, help="input patch size")
+    categorical: bool = HfArg(
+        aliases=["--cat"], default=True, help="use categorical cross-entropy loss"
+    )
     vocab_size: int = HfArg(
         aliases=["--vs"], default=1024, help="visual token vocab size"
     )
-    vocab_samples: int = HfArg(
-        aliases=["--vss"], default=4000, help="num vocab training samples"
-    )
     vocab_state: Optional[str] = HfArg(
-        aliases=["--vst"], default=None, help="tokenizer vocab state to load"
+        aliases=["--vstate"], default=None, help="tokenizer vocab state to load"
     )
-    ordering: Optional[str] = HfArg(default="radial", help="default patch ordering")
-    # Paths
-    out_dir: str = HfArg(default="results", help="path to root output directory")
-    prefix: Optional[str] = HfArg(default=None, help="experiment name prefix")
-    name: Optional[str] = HfArg(default=None, help="full experiment name")
-    desc: Optional[str] = HfArg(default=None, help="description to attach to run")
+    shuffle: Optional[bool] = HfArg(
+        default=False, help="shuffle patch ordering on each iteration"
+    )
+    with_sub_embed: bool = HfArg(
+        aliases=["--sub"], default=True, help="learn subject-specific embedding"
+    )
     # Regularization and augmentation
-    shuffle: Optional[bool] = HfArg(default=False, help="shuffle patch ordering")
     drop_rate: float = HfArg(aliases=["--dr"], default=0.0, help="head dropout rate")
     sub_drop_rate: float = HfArg(
         aliases=["--sdr"], default=0.0, help="subject ID dropout rate"
@@ -102,6 +91,11 @@ class Args:
         aliases=["--accum"], default=1, help="number of gradient accumulation steps"
     )
     clip_grad: Optional[float] = HfArg(default=1.0, help="gradient norm clipping")
+    # Paths
+    out_dir: str = HfArg(default="results", help="path to root output directory")
+    prefix: Optional[str] = HfArg(default=None, help="experiment name prefix")
+    name: Optional[str] = HfArg(default=None, help="full experiment name")
+    desc: Optional[str] = HfArg(default=None, help="description to attach to run")
     # Logistics
     checkpoint: Optional[str] = HfArg(
         aliases=["--ckpt"], default=None, help="checkpoint to load"
@@ -192,9 +186,10 @@ def main(args: Args):
 
     # Datasets and loaders
     logging.info("Loading NSD-Flat dataset")
-    dsets, mask = load_nsd_flat(keep_in_memory=clust.device.type == "cuda")
+    dsets = load_nsd_flat(keep_in_memory=clust.device.type == "cuda")
     for split, ds in dsets.items():
         logging.info("%s samples: %d", split.capitalize(), len(ds))
+    mask = load_nsd_flat_mask()
     logging.info("Activity shape: %s", mask.shape)
     logging.info(
         "Mask size: %d/%d (%.3f)", mask.sum(), mask.numel(), mask.float().mean()
@@ -221,55 +216,40 @@ def main(args: Args):
             drop_last=True,  # helpful for torch.compile
         )
 
-    # Tokenizer
-    logging.info("Creating tokenizer")
-    tokenizer = BoldTokenizer(
-        mask,
-        patch_size=args.patch_size,
-        vocab_size=args.vocab_size,
-        ordering=args.ordering,
-    )
-    logging.info(
-        "Patch size: %d, Num patches: %d, Dim: %d",
-        args.patch_size,
-        tokenizer.num_patches,
-        tokenizer.dim,
-    )
-
-    if args.vocab_state:
-        logging.info("Loading tokenizer vocab state: %s", args.vocab_state)
-        state_dict = torch.load(args.vocab_state, map_location="cpu")
-        tokenizer.load_vocab(state_dict["vocab"])
-    else:
-        logging.info("Fitting tokenizer vocab")
-        sample_indices = torch.randperm(len(dsets["train"]))[: args.vocab_samples]
-        sample_activity = dsets["train"].select(sample_indices)["activity"]
-        sample_activity = transform(sample_activity)
-        tokenizer.fit(sample_activity)
-        logging.info("Vocab[:3, :5]: %s", tokenizer.vocab[:3, :5])
-
-    if clust.master_process:
-        torch.save(tokenizer.state_dict(), out_dir / "tok_state.pt")
-    tokenizer = tokenizer.to(clust.device)
-
-    # Model and optimizer
+    # Model
     logging.info("Creating model: %s", args.model)
     model = create_model(
         args.model,
-        num_patches=tokenizer.num_patches,
-        in_features=tokenizer.dim,
-        num_classes=args.vocab_size,
+        mask=mask,
+        categorical=args.categorical,
+        vocab_size=args.vocab_size,
+        shuffle=args.shuffle,
+        with_sub_embed=args.with_sub_embed,
         drop_rate=args.drop_rate,
         sub_drop_rate=args.sub_drop_rate,
         proj_drop_rate=args.proj_drop_rate,
         attn_drop_rate=args.attn_drop_rate,
         drop_path_rate=args.drop_path_rate,
     )
-    model = model.to(clust.device)
+    model: BoldGPT = model.to(clust.device)
     logging.info("%s", model)
     logging.info("Params: %.0fM", sum(p.numel() for p in model.parameters()) / 1e6)
 
-    optimizer = create_optimizer(args, model)
+    # Tokenizer vocab
+    if args.categorical:
+        assert (
+            args.vocab_state is not None
+        ), "vocab_state is required for categorical model; run fit_vocab.py"
+
+        logging.info("Loading tokenizer vocab state: %s", args.vocab_state)
+        state_dict = torch.load(args.vocab_state, map_location=clust.device)
+        model.tokenizer.load_state_dict(state_dict)
+
+    # Optimizer
+    logging.info("Creating optimizer")
+    optimizer, no_decay_keys = create_optimizer(args, model)
+    logging.info("%s", optimizer)
+    logging.info("No decay keys[:20]:\n%s", no_decay_keys[:20])
 
     # Load checkpoint
     if args.checkpoint:
@@ -300,7 +280,6 @@ def main(args: Args):
         train(
             args=args,
             epoch=epoch,
-            tokenizer=tokenizer,
             model=model,
             train_loader=loaders["train"],
             optimizer=optimizer,
@@ -314,7 +293,6 @@ def main(args: Args):
             args=args,
             epoch=epoch,
             step=(epoch + 1) * epoch_steps,
-            tokenizer=tokenizer,
             model=model,
             val_loader=loaders["val"],
             clust=clust,
@@ -368,11 +346,21 @@ class Collate(torch.nn.Module):
         return collated
 
 
-def create_optimizer(args: Args, model: BoldGPT) -> torch.optim.Optimizer:
-    named_params = {name: p for name, p in model.named_parameters() if p.requires_grad}
-    no_decay_keys = set(model.no_decay_keys())
-    decay_params = [p for name, p in named_params.items() if name not in no_decay_keys]
-    no_decay_params = [p for name, p in named_params.items() if name in no_decay_keys]
+def create_optimizer(
+    args: Args, model: BoldGPT
+) -> Tuple[torch.optim.Optimizer, List[str]]:
+    decay_params = []
+    no_decay_params = []
+    no_decay_keys = get_no_decay_keys(model)
+    no_decay_set = set(no_decay_keys)
+
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if name in no_decay_set:
+            no_decay_params.append(p)
+        else:
+            decay_params.append(p)
 
     optim_groups = [
         {"params": decay_params, "weight_decay": args.weight_decay},
@@ -381,13 +369,12 @@ def create_optimizer(args: Args, model: BoldGPT) -> torch.optim.Optimizer:
     optimizer = torch.optim.AdamW(
         optim_groups, lr=args.lr, betas=(args.beta1, args.beta2)
     )
-    return optimizer
+    return optimizer, no_decay_keys
 
 
 def train(
     args: Args,
     epoch: int,
-    tokenizer: BoldTokenizer,
     model: BoldGPT,
     train_loader: DataLoader,
     optimizer: torch.optim.Optimizer,
@@ -396,11 +383,9 @@ def train(
     scaler: Optional[GradScaler],
     out_dir: Path,
 ):
+    model.train()
     if clust.use_cuda:
         torch.cuda.reset_peak_memory_stats()
-
-    model.train()
-    shuffle = BoldShuffle()
 
     params = [p for group in optimizer.param_groups for p in group["params"]]
 
@@ -417,7 +402,7 @@ def train(
     loss_m = AverageMeter()
     data_time_m = AverageMeter()
     step_time_m = AverageMeter()
-    examples = {}
+    examples = None
 
     epoch_batches = len(train_loader)
     accum_steps = args.grad_accum_steps
@@ -431,30 +416,19 @@ def train(
     optimizer.zero_grad()
 
     end = time.monotonic()
-    for batch_idx, sample in enumerate(train_loader):
+    for batch_idx, batch in enumerate(train_loader):
         step = first_step + batch_idx // accum_steps
         is_last_batch = batch_idx + 1 == epoch_batches
         need_update = is_last_batch or (batch_idx + 1) % accum_steps == 0
         if batch_idx >= last_batch_idx_to_accum:
             accum_steps = last_accum_steps
-
-        # Unpack and map data to cuda
-        activity = sample["activity"].to(clust.device)
-        sub_indices = sample["subject_id"].to(clust.device)
-        batch_size = len(activity)
+        batch = {k: to_device(v) for k, v in batch.items()}
+        batch_size = len(batch["subject_id"])
         data_time = time.monotonic() - end
 
-        # Patchify, tokenize, and optionally shuffle
-        patches, tokens = tokenizer(activity)
-        if args.shuffle:
-            patches, tokens, order = shuffle(patches, tokens)
-        else:
-            order = None
-
-        # Predict and compute loss
         with autocast():
-            logits = model(patches, sub_indices, order=order)
-            loss = F.cross_entropy(logits.flatten(0, 1), tokens.flatten())
+            loss, state = model(batch)
+
         if clust.ddp:
             loss_item = reduce_tensor(loss.detach(), clust.world_size).item()
         else:
@@ -493,18 +467,7 @@ def train(
         step_time_m.update(step_time, batch_size)
 
         if clust.master_process and batch_idx == 0 and args.figures:
-            pred = logits.detach().argmax(dim=-1)
-            # Unshuffle tokens and predictions if necessary
-            if args.shuffle:
-                tokens = shuffle.inverse(tokens)
-                pred = shuffle.inverse(pred)
-
-            examples["subid"] = sub_indices[:NUM_EXAMPLES]
-            examples["nsdid"] = sample["nsd_id"][:NUM_EXAMPLES]
-            examples["activity"] = activity[:NUM_EXAMPLES]
-            examples["tokens"] = tokens[:NUM_EXAMPLES]
-            examples["pred"] = pred[:NUM_EXAMPLES]
-            examples["order"] = order[:NUM_EXAMPLES] if args.shuffle else None
+            examples = model.prepare_examples(batch, state)
 
         if (step % LOG_INTERVAL == 0 and need_update) or is_last_batch or args.debug:
             tput = (clust.world_size * args.batch_size) / step_time_m.avg
@@ -550,7 +513,7 @@ def train(
     if clust.master_process and args.figures:
         example_path = out_dir / "figures" / f"train_examples-{epoch:04d}.png"
         example_path.parent.mkdir(exist_ok=True)
-        plot_examples(tokenizer, fname=example_path, **examples)
+        model.plot_examples(examples, num_examples=NUM_EXAMPLES, fname=example_path)
 
         if args.wandb:
             wandb.log(
@@ -565,35 +528,29 @@ def validate(
     args: Args,
     epoch: int,
     step: int,
-    tokenizer: BoldTokenizer,
     model: BoldGPT,
     val_loader: DataLoader,
     clust: ClusterInfo,
     out_dir: Path,
 ) -> float:
+    model.eval()
     if clust.use_cuda:
         torch.cuda.reset_peak_memory_stats()
-
-    model.eval()
 
     loss_m = AverageMeter()
     data_time_m = AverageMeter()
     step_time_m = AverageMeter()
-    examples = {}
+    examples = None
 
     epoch_batches = len(val_loader)
     end = time.monotonic()
-    for batch_idx, sample in enumerate(val_loader):
-        # Unpack and map data to cuda
-        activity = sample["activity"].to(clust.device)
-        sub_indices = sample["subject_id"].to(clust.device)
-        batch_size = len(activity)
+    for batch_idx, batch in enumerate(val_loader):
+        batch = {k: to_device(v, clust.device) for k, v in batch.items()}
+        batch_size = len(batch["subject_id"])
         data_time = time.monotonic() - end
 
         # Predict and compute loss
-        patches, tokens = tokenizer(activity)
-        logits = model(patches, sub_indices)
-        loss = F.cross_entropy(logits.flatten(0, 1), tokens.flatten())
+        loss, state = model(batch)
         if clust.ddp:
             loss_item = reduce_tensor(loss.detach(), clust.world_size).item()
         else:
@@ -609,11 +566,7 @@ def validate(
         step_time_m.update(step_time, batch_size)
 
         if clust.master_process and batch_idx == 0 and args.figures:
-            examples["subid"] = sub_indices[:NUM_EXAMPLES]
-            examples["nsdid"] = sample["nsd_id"][:NUM_EXAMPLES]
-            examples["activity"] = activity[:NUM_EXAMPLES]
-            examples["tokens"] = tokens[:NUM_EXAMPLES]
-            examples["pred"] = logits.detach().argmax(-1)[:NUM_EXAMPLES]
+            examples = model.prepare_examples(batch, state)
 
         if (
             batch_idx % LOG_INTERVAL == 0
@@ -658,16 +611,21 @@ def validate(
 
     if clust.master_process and args.figures:
         example_path = out_dir / "figures" / f"val_examples-{epoch:04d}.png"
-        plot_examples(tokenizer, fname=example_path, **examples)
+        model.plot_examples(examples, num_examples=NUM_EXAMPLES, fname=example_path)
 
         if args.wandb:
             wandb.log(
                 {"figs": {"val_examples": wandb.Image(str(example_path))}}, step=step
             )
-
         plt.close("all")
 
     return loss_m.avg
+
+
+def to_device(data: Union[torch.Tensor, Any], device: torch.device):
+    if isinstance(data, torch.Tensor):
+        data = data.to(device)
+    return data
 
 
 def load_checkpoint(

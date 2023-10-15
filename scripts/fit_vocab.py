@@ -15,8 +15,9 @@ from sklearn.decomposition import PCA
 from timm.utils import random_seed
 from torchvision.utils import make_grid
 
-from boldgpt.data import ActivityTransform, load_nsd_flat
-from boldgpt.tokenizer import BoldTokenizer
+from boldgpt.data import ActivityTransform, load_nsd_flat, load_nsd_flat_mask
+from boldgpt.patching import MaskedPatchify
+from boldgpt.tokenizer import KMeansTokenizer
 
 plt.style.use("ggplot")
 plt.rcParams["figure.dpi"] = 150
@@ -56,33 +57,31 @@ def main(args: Args):
         out_dir.mkdir(parents=True)
 
     logging.info("Loading data")
-    dsets, mask = load_nsd_flat(keep_in_memory=False)
+    dsets = load_nsd_flat(keep_in_memory=False)
+    mask = load_nsd_flat_mask()
 
     transform = ActivityTransform()
     sample_indices = torch.randperm(len(dsets["train"]))[: args.vocab_samples]
     sample_activity = dsets["train"].select(sample_indices)["activity"]
     sample_activity = transform(sample_activity)
     logging.info("Sample activity shape: %s", sample_activity.shape)
-    logging.info(
-        "Sample activity min: %.3f, mean: %.3f, max: %.3f",
-        sample_activity.min(),
-        sample_activity.mean(),
-        sample_activity.max(),
-    )
 
-    logging.info("Creating tokenizer")
-    tokenizer = BoldTokenizer(
-        mask, patch_size=args.patch_size, vocab_size=args.vocab_size
-    )
+    patchify = MaskedPatchify(mask, patch_size=args.patch_size)
+    sample_patches = patchify(sample_activity)
+    # Restrict to interior patches only. This way, we don't bother wasting tokens to
+    # represent the boundary.
+    sample_patches = sample_patches[:, patchify.interior_mask]
+    logging.info("Sample patches shape: %s", sample_patches.shape)
     logging.info(
-        "Patch size: %d, num patches: %d, dim: %d",
-        args.patch_size,
-        tokenizer.num_patches,
-        tokenizer.dim,
+        "Sample patches min: %.3f, mean: %.3f, max: %.3f",
+        sample_patches.min(),
+        sample_patches.mean(),
+        sample_patches.max(),
     )
 
     logging.info("Fitting tokenizer")
-    tokenizer.fit(sample_activity)
+    tokenizer = KMeansTokenizer(vocab_size=args.vocab_size)
+    tokenizer.fit(sample_patches)
     logging.info("Vocab shape: %s", tokenizer.vocab.shape)
     logging.info(
         "Vocab min: %.3f, mean: %.3f, max: %.3f",
@@ -92,7 +91,7 @@ def main(args: Args):
     )
     logging.info("Vocab[:3, :5]: %s", tokenizer.vocab[:3, :5])
 
-    logging.info("Fitting vocab embedding")
+    logging.info("Fitting vocab embedding for visualization")
     vocab_examples = tokenizer.vocab[:NUM_EXAMPLES]
     pca = PCA(n_components=2).fit(vocab_examples)
     vocab_emb = pca.transform(vocab_examples)

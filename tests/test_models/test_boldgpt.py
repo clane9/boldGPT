@@ -1,5 +1,4 @@
 import logging
-from contextlib import suppress
 from pathlib import Path
 
 import matplotlib as mpl
@@ -7,6 +6,7 @@ import pytest
 import torch
 
 from boldgpt.models import BoldGPT, create_model
+from boldgpt.models.utils import get_no_decay_keys
 
 mpl.use("Agg")
 
@@ -22,20 +22,17 @@ def test_boldgpt(categorical: bool, training: bool):
     model: BoldGPT = create_model("boldgpt_tiny_patch10", categorical=categorical)
     logging.info("Model:\n%s", model)
 
+    no_decay_keys = get_no_decay_keys(model)
+    logging.info("No decay keys[:10]:\n%s", no_decay_keys[:10])
+
     batch = {
         "activity": torch.randn(4, 215, 200),
         "subject_id": torch.arange(4),
         "nsd_id": torch.arange(4),
     }
 
-    loss, state = model.step(
-        batch=batch,
-        batch_idx=0,
-        device=torch.device("cpu"),
-        autocast=suppress,
-        training=training,
-    )
-
+    model.train(training)
+    loss, state = model.forward(batch)
     logging.info("Loss: %.3e", loss.item())
 
     def get_shape(v):
@@ -45,7 +42,9 @@ def test_boldgpt(categorical: bool, training: bool):
 
     logging.info("State:\n%s", {k: get_shape(v) for k, v in state.items()})
 
+    examples = model.prepare_examples(batch, state)
     model.plot_examples(
+        examples,
         num_examples=3,
         fname=RESULT_DIR / f"examples_cat-{categorical}_train-{training}.png",
     )

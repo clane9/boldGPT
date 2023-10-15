@@ -1,11 +1,11 @@
 import logging
-from typing import Callable, Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from matplotlib import colormaps
 from matplotlib import pyplot as plt
-from matplotlib.cm import get_cmap
 from matplotlib.figure import Figure
 from torch import nn
 
@@ -17,7 +17,7 @@ from boldgpt.tokenizer import KMeansTokenizer
 from .registry import register_model
 from .transformer import Transformer
 
-CMAP = get_cmap("turbo")
+CMAP = colormaps.get_cmap("turbo")
 CMAP.set_bad("gray")
 
 
@@ -40,36 +40,36 @@ class BoldGPT(nn.Module):
             self.tokenizer = tokenizer
         self.decoder = decoder
 
-        self.examples: Dict[str, np.ndarray] = {}
-
-    def step(
+    def forward(
         self,
         batch: Dict[str, torch.Tensor],
-        batch_idx: int,
-        device: torch.device,
-        autocast: Callable,
-        training: bool = True,
-    ):
-        activity = batch["activity"].to(device)
+    ) -> Tuple[torch.Tensor, Dict[str, Optional[torch.Tensor]]]:
+        activity = batch["activity"]
         if self.decoder.with_sub_embed:
-            sub_indices = batch["subject_id"].to(device)
+            sub_indices = batch["subject_id"]
         else:
             sub_indices = None
 
         patches = self.patchify(activity)
         B, N = patches.shape[:2]
+        device = patches.device
 
-        if training and self.shuffle:
+        if self.shuffle and self.training:
             order, ranking = random_order(B, N, device=device)
             patches = shuffle(patches, order)
+            patch_mask = self.patchify.patch_mask.expand(B, -1, -1)
+            patch_mask = shuffle(patch_mask, order)
         else:
             order = ranking = None
+            patch_mask = None
 
-        tokens = self.tokenizer(patches) if self.is_categorical else None
+        if self.is_categorical:
+            tokens = self.tokenizer(patches)
+        else:
+            tokens = None
 
-        with autocast():
-            output = self.decoder(patches, sub_indices=sub_indices, order=order)
-            loss = self.loss_fn(output, patches, tokens)
+        output = self.decoder(patches, sub_indices=sub_indices, order=order)
+        loss = self.loss_fn(output, patches, tokens, patch_mask=patch_mask)
 
         state = dict(
             patches=patches,
@@ -77,11 +77,7 @@ class BoldGPT(nn.Module):
             ranking=ranking,
             tokens=tokens,
             output=output.detach(),
-            loss=loss.detach(),
         )
-
-        if batch_idx == 0:
-            self._save_examples(batch, **state)
         return loss, state
 
     def loss_fn(
@@ -89,30 +85,44 @@ class BoldGPT(nn.Module):
         output: torch.Tensor,
         patches: torch.Tensor,
         tokens: Optional[torch.Tensor],
+        patch_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.is_categorical:
             loss = F.cross_entropy(output.flatten(0, 1), tokens.flatten())
         else:
+            # Mask output by patch_mask
+            # We assume the patches are already masked
+            # Note that if patches are shuffled, the mask must be shuffled as well.
+            if patch_mask is None:
+                patch_mask = self.patchify.patch_mask
+            output = output * patch_mask
             loss = F.mse_loss(output, patches)
         return loss
 
-    def _save_examples(
+    def prepare_examples(
         self,
         batch: Dict[str, torch.Tensor],
-        patches: torch.Tensor,
-        order: Optional[torch.Tensor],
-        ranking: Optional[torch.Tensor],
-        tokens: Optional[torch.Tensor],
-        output: torch.Tensor,
-        **kwargs,
-    ):
-        examples = {}
+        state: Dict[str, torch.Tensor],
+    ) -> Dict[str, np.ndarray]:
+        """
+        Prepare a batch of examples for figure generation.
+        """
+        subind = batch["subject_id"]
+        nsdind = batch["nsd_id"]
+        activity = batch["activity"]
+
+        patches = state["patches"]
+        order = state["order"]
+        ranking = state["ranking"]
+        tokens = state["tokens"]
+        output = state["output"]
+
         B, N = patches.shape[:2]
         device = patches.device
 
-        examples["subject_id"] = batch["subject_id"]
-        examples["nsd_id"] = batch["nsd_id"]
-        examples["activity"] = batch["activity"]
+        # Ensure activity is masked
+        mask = self.patchify.mask
+        activity = mask * activity
 
         # Unshuffle if necessary
         if order is not None:
@@ -123,25 +133,29 @@ class BoldGPT(nn.Module):
         else:
             ranking = torch.arange(N, device=device).expand(B, -1)
 
+        # Invert order, target, reconstruction and compute MSE
         order_map = self.patchify.inverse_vector(ranking.float() + 1.0)
         target = self.inverse_target(patches, tokens)
         recon = self.inverse_recon(output)
-        examples["order_map"] = order_map
-        examples["target"] = target
-        examples["recon"] = recon
-
-        activity = batch["activity"]
-        mask = self.patchify.mask
         target_error = F.mse_loss(
             activity[:, mask], target[:, mask], reduction="none"
         ).mean(dim=1)
         recon_error = F.mse_loss(
             activity[:, mask], recon[:, mask], reduction="none"
         ).mean(dim=1)
-        examples["recon_error"] = recon_error
-        examples["target_error"] = target_error
 
-        self.examples.update({k: v.cpu().numpy() for k, v in examples.items()})
+        examples = {
+            "subject_id": subind,
+            "nsd_id": nsdind,
+            "activity": activity,
+            "order_map": order_map,
+            "target": target,
+            "recon": recon,
+            "target_error": target_error,
+            "recon_error": recon_error,
+        }
+        examples = {k: v.cpu().numpy() for k, v in examples.items()}
+        return examples
 
     def inverse_target(
         self, patches: torch.Tensor, tokens: Optional[torch.Tensor]
@@ -159,12 +173,15 @@ class BoldGPT(nn.Module):
         return recon
 
     def plot_examples(
-        self, num_examples: int = 10, fname: Optional[str] = None
+        self,
+        examples: Dict[str, np.ndarray],
+        num_examples: int = 10,
+        fname: Optional[str] = None,
     ) -> Figure:
         """
         Plot a grid of samples and predictions.
         """
-        examples = {k: v[:num_examples] for k, v in self.examples.items()}
+        examples = {k: v[:num_examples] for k, v in examples.items()}
 
         subind = examples["subject_id"]
         nsdind = examples["nsd_id"]
@@ -264,10 +281,10 @@ def _create_bold_gpt(
     mask: Optional[np.ndarray] = None,
     patch_size: int = 10,
     ordering: str = "radial",
-    shuffle: bool = True,
     categorical: bool = True,
     with_sub_embed: bool = True,
     vocab_size: int = 1024,
+    shuffle: bool = True,
     num_subs: int = 8,
     embed_dim: int = 768,
     depth: int = 12,
