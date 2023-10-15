@@ -46,6 +46,11 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+## Related work
+
+- [SAIM](https://github.com/qiy20/SAIM/tree/main): Stochastic Autoregressive Image Modeling for Visual Representation, AAAI 2023
+- [RandSAC](https://arxiv.org/abs/2203.12054): Self-supervision through Random Segments with Autoregressive Coding, ICLR 2023
+
 ## Contribute
 
 If you'd like to contribute, please feel free fork the repo and join (or start!) a conversation in our [issues](https://github.com/clane9/boldGPT/issues).
