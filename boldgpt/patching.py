@@ -30,6 +30,7 @@ class MaskedPatchify(nn.Module):
         self,
         mask: torch.Tensor,
         patch_size: int = 8,
+        num_channels: int = 1,
         ordering: str = "raster",
     ):
         assert mask.ndim == 2, f"Invalid mask shape {mask.shape}; expected (H, W)"
@@ -43,10 +44,11 @@ class MaskedPatchify(nn.Module):
         device = mask.device
 
         self.patch_size = patch_size
+        self.num_channels = num_channels
         self.ordering = ordering
         self.height = H
         self.width = W
-        self.dim = patch_size**2
+        self.dim = num_channels * patch_size**2
 
         # Padding to multiple of patch size
         self.padding = padding = _infer_padding(H, W, multiple=patch_size)
@@ -54,10 +56,10 @@ class MaskedPatchify(nn.Module):
 
         # Patchify/unpatchify using einops
         self.to_patches = Rearrange(
-            "b (h p1) (w p2) -> b (h w) (p1 p2)", p1=patch_size, p2=patch_size
+            "b c (h p1) (w p2) -> b (h w) (c p1 p2)", p1=patch_size, p2=patch_size
         )
         self.from_patches = Rearrange(
-            "b (h w) (p1 p2) -> b (h p1) (w p2)",
+            "b (h w) (c p1 p2) -> b c (h p1) (w p2)",
             h=math.ceil(H / patch_size),
             w=math.ceil(W / patch_size),
             p1=patch_size,
@@ -65,7 +67,8 @@ class MaskedPatchify(nn.Module):
         )
 
         # Patchified mask
-        patch_mask = self.forward_raw(mask[None, ...]).squeeze(0)
+        patch_mask = self.forward_raw(mask.expand(1, num_channels, -1, -1))
+        patch_mask = patch_mask.squeeze(0)
         self.num_total_patches = len(patch_mask)
 
         # Indices of patches intersecting the mask
@@ -77,7 +80,8 @@ class MaskedPatchify(nn.Module):
             order = torch.arange(self.num_patches, device=device)
         elif ordering == "radial":
             dist = _distance_map(mask)
-            patch_dist = self.forward_raw(dist[None, ...]).squeeze(0)
+            patch_dist = self.forward_raw(dist.expand(1, num_channels, -1, -1))
+            patch_dist = patch_dist.squeeze(0)
             patch_dist = patch_dist[patch_indices]
             patch_dist = torch.mean(patch_dist, dim=1)
             order = torch.argsort(patch_dist)
@@ -106,14 +110,16 @@ class MaskedPatchify(nn.Module):
         return torch.all(self.patch_mask, dim=-1)
 
     def forward_raw(self, images: torch.Tensor) -> torch.Tensor:
-        assert images.ndim == 3, "Invalid image shape; expected (B, H, W)"
+        if self.num_channels == 1 and images.ndim == 3:
+            images = images.unsqueeze(1)
+        assert images.ndim == 4, "Invalid image shape; expected (B, C, H, W)"
         images = self.pad(images)
         patches = self.to_patches(images)
         return patches
 
     def forward(self, images: torch.Tensor, apply_mask: bool = True) -> torch.Tensor:
         """
-        Convert images, shape (B, H, W), to patches, shape (B, N, C).
+        Convert images, shape (B, C, H, W), to patches, shape (B, N, D).
         """
         patches = self.forward_raw(images)
         patches = patches[..., self.patch_indices, :]
@@ -121,11 +127,14 @@ class MaskedPatchify(nn.Module):
             patches = patches * self.patch_mask
         return patches
 
-    def inverse(self, patches: torch.Tensor, apply_mask: bool = True) -> torch.Tensor:
+    def inverse(
+        self, patches: torch.Tensor, apply_mask: bool = True, squeeze: bool = True
+    ) -> torch.Tensor:
         """
-        Convert patches, shape (B, N, C), back to images, shape (B, H, W).
+        Convert patches, shape (B, N, D), back to images, shape (B, C, H, W). If squeeze
+        is True and C is 1, the channels dimension is squeezed.
         """
-        assert patches.ndim == 3, "Invalid patches shape; expected (B, N, C)"
+        assert patches.ndim == 3, "Invalid patches shape; expected (B, N, D)"
         assert patches.shape[1] == self.num_patches, "Invalid patches shape"
         B = patches.shape[0]
         dtype = patches.dtype
@@ -144,6 +153,8 @@ class MaskedPatchify(nn.Module):
 
         if apply_mask:
             images = images * self.mask
+        if squeeze and self.num_channels == 1:
+            images = images.squeeze(1)
         return images
 
     def inverse_vector(
