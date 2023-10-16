@@ -1,4 +1,5 @@
 import math
+from typing import Union
 
 import torch
 from einops.layers.torch import Rearrange
@@ -16,6 +17,8 @@ class MaskedPatchify(nn.Module):
     - raster: original image raster order
     - radial: patches sorted by distance from mask centroid
     - random: fixed random patch ordering
+
+    Or you can pass a custom priority tensor, shape (H, W), to determine the order.
     """
 
     # TODO: could add support for a custom ordering provided via a "priority" map
@@ -31,7 +34,7 @@ class MaskedPatchify(nn.Module):
         mask: torch.Tensor,
         patch_size: int = 8,
         num_channels: int = 1,
-        ordering: str = "raster",
+        ordering: Union[str, torch.Tensor] = "raster",
     ):
         assert mask.ndim == 2, f"Invalid mask shape {mask.shape}; expected (H, W)"
         assert (
@@ -76,15 +79,13 @@ class MaskedPatchify(nn.Module):
         self.num_patches = len(patch_indices)
 
         # Patch order
-        if ordering == "raster":
+        if isinstance(ordering, torch.Tensor):
+            order = self._priority_order(ordering, patch_indices)
+        elif ordering == "raster":
             order = torch.arange(self.num_patches, device=device)
         elif ordering == "radial":
-            dist = _distance_map(mask)
-            patch_dist = self.forward_raw(dist.expand(1, num_channels, -1, -1))
-            patch_dist = patch_dist.squeeze(0)
-            patch_dist = patch_dist[patch_indices]
-            patch_dist = torch.mean(patch_dist, dim=1)
-            order = torch.argsort(patch_dist)
+            priority = distance_map(mask)
+            order = self._priority_order(priority, patch_indices)
         elif ordering == "random":
             order = torch.randperm(self.num_patches, device=device)
         else:
@@ -101,6 +102,17 @@ class MaskedPatchify(nn.Module):
         self.register_buffer("patch_indices", patch_indices)
         self.register_buffer("order", order)
         self.register_buffer("ranking", torch.argsort(order))
+
+    def _priority_order(
+        self, priority: torch.Tensor, patch_indices: torch.Tensor
+    ) -> torch.Tensor:
+        assert priority.shape == (self.height, self.width), "Invalid priority shape"
+        priority = priority.expand(1, self.num_channels, -1, -1)
+        patch_priority = self.forward_raw(priority).squeeze(0)
+        patch_priority = patch_priority[patch_indices]
+        patch_priority = torch.mean(patch_priority, dim=1)
+        order = torch.argsort(patch_priority)
+        return order
 
     @property
     def interior_mask(self) -> torch.Tensor:
@@ -189,7 +201,7 @@ def _infer_padding(height: int, width: int, multiple: int = 8):
     return padding
 
 
-def _distance_map(mask: torch.Tensor) -> torch.Tensor:
+def distance_map(mask: torch.Tensor) -> torch.Tensor:
     """
     Compute the distance map from the mask centroid.
     """
