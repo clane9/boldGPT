@@ -26,7 +26,7 @@ from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 
 from boldgpt.data import ActivityTransform, load_nsd_flat, load_nsd_flat_mask
-from boldgpt.models import BoldGPT, create_model, list_models
+from boldgpt.models import ImageGPT, create_model, list_models
 from boldgpt.models.utils import get_no_decay_keys
 from boldgpt.utils import ClusterInfo, get_exp_name, get_sha, seed_hash, setup_logging
 
@@ -231,7 +231,7 @@ def main(args: Args):
         attn_drop_rate=args.attn_drop_rate,
         drop_path_rate=args.drop_path_rate,
     )
-    model: BoldGPT = model.to(clust.device)
+    model: ImageGPT = model.to(clust.device)
     logging.info("%s", model)
     logging.info("Params: %.0fM", sum(p.numel() for p in model.parameters()) / 1e6)
 
@@ -347,7 +347,7 @@ class Collate(torch.nn.Module):
 
 
 def create_optimizer(
-    args: Args, model: BoldGPT
+    args: Args, model: ImageGPT
 ) -> Tuple[torch.optim.Optimizer, List[str]]:
     decay_params = []
     no_decay_params = []
@@ -375,7 +375,7 @@ def create_optimizer(
 def train(
     args: Args,
     epoch: int,
-    model: BoldGPT,
+    model: ImageGPT,
     train_loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     clust: ClusterInfo,
@@ -427,7 +427,8 @@ def train(
         data_time = time.monotonic() - end
 
         with autocast():
-            loss, state = model(batch)
+            output, state = model(batch)
+            loss = model.loss_fn(batch, output, state)
 
         if clust.ddp:
             loss_item = reduce_tensor(loss.detach(), clust.world_size).item()
@@ -528,7 +529,7 @@ def validate(
     args: Args,
     epoch: int,
     step: int,
-    model: BoldGPT,
+    model: ImageGPT,
     val_loader: DataLoader,
     clust: ClusterInfo,
     out_dir: Path,
@@ -550,7 +551,8 @@ def validate(
         data_time = time.monotonic() - end
 
         # Predict and compute loss
-        loss, state = model(batch)
+        output, state = model(batch)
+        loss = model.loss_fn(batch, output, state)
         if clust.ddp:
             loss_item = reduce_tensor(loss.detach(), clust.world_size).item()
         else:
@@ -630,7 +632,7 @@ def to_device(data: Union[torch.Tensor, Any], device: torch.device):
 
 def load_checkpoint(
     args: Args,
-    model: BoldGPT,
+    model: ImageGPT,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
 ):
@@ -655,7 +657,7 @@ def save_checkpoint(
     epoch: int,
     metric: float,
     is_best: bool,
-    model: Union[DDP, BoldGPT],
+    model: Union[DDP, ImageGPT],
     optimizer: torch.optim.Optimizer,
     out_dir: Path,
 ):

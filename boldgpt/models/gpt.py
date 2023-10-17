@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, Literal, Optional, Tuple
 
 import numpy as np
 import torch
@@ -16,22 +16,26 @@ from boldgpt.tokenizer import KMeansTokenizer
 
 from .registry import register_model
 from .transformer import Transformer
+from .utils import r2_score
 
 CMAP = colormaps.get_cmap("turbo")
 CMAP.set_bad("gray")
 
 
-class BoldGPT(nn.Module):
+class ImageGPT(nn.Module):
     def __init__(
         self,
         patchify: MaskedPatchify,
         tokenizer: Optional[KMeansTokenizer],
         decoder: Transformer,
         shuffle: bool = True,
+        modality: Literal["image", "bold"] = "bold",
     ):
         super().__init__()
         self.shuffle = shuffle
+        self.modality = modality
         self.is_categorical = tokenizer is not None
+        self.with_sub_embed = decoder.with_sub_embed
 
         self.patchify = patchify
         if tokenizer is None:
@@ -44,33 +48,23 @@ class BoldGPT(nn.Module):
         self,
         batch: Dict[str, torch.Tensor],
     ) -> Tuple[torch.Tensor, Dict[str, Optional[torch.Tensor]]]:
-        activity = batch["activity"]
-        if self.decoder.with_sub_embed:
-            sub_indices = batch["subject_id"]
-        else:
-            sub_indices = None
+        # Unpack data
+        images = batch["activity"] if self.modality == "bold" else batch["image"]
+        sub_indices = batch["subject_id"] if self.with_sub_embed else None
 
-        patches = self.patchify(activity)
+        # Get patches and optionally tokens
+        patches = self.patchify(images)
         B, N = patches.shape[:2]
         device = patches.device
-
         if self.shuffle and self.training:
             order, ranking = random_order(B, N, device=device)
             patches = shuffle(patches, order)
-            patch_mask = self.patchify.patch_mask.expand(B, -1, -1)
-            patch_mask = shuffle(patch_mask, order)
         else:
             order = ranking = None
-            patch_mask = None
+        tokens = self.tokenizer(patches) if self.is_categorical else None
 
-        if self.is_categorical:
-            tokens = self.tokenizer(patches)
-        else:
-            tokens = None
-
+        # Forward pass
         output = self.decoder(patches, sub_indices=sub_indices, order=order)
-        loss = self.loss_fn(output, patches, tokens, patch_mask=patch_mask)
-
         state = dict(
             patches=patches,
             order=order,
@@ -78,22 +72,27 @@ class BoldGPT(nn.Module):
             tokens=tokens,
             output=output.detach(),
         )
-        return loss, state
+        return output, state
 
     def loss_fn(
         self,
+        batch: Dict[str, torch.Tensor],
         output: torch.Tensor,
-        patches: torch.Tensor,
-        tokens: Optional[torch.Tensor],
-        patch_mask: Optional[torch.Tensor] = None,
+        state: Dict[str, Optional[torch.Tensor]],
     ) -> torch.Tensor:
         if self.is_categorical:
+            tokens = state["tokens"]
             loss = F.cross_entropy(output.flatten(0, 1), tokens.flatten())
         else:
             # Mask output by patch_mask
             # We assume the patches are already masked
             # Note that if patches are shuffled, the mask must be shuffled as well.
-            if patch_mask is None:
+            patches = state["patches"]
+            order = state["order"]
+            if order is not None:
+                patch_mask = self.patchify.patch_mask.expand(output.size(0), -1, -1)
+                patch_mask = shuffle(patch_mask, order)
+            else:
                 patch_mask = self.patchify.patch_mask
             output = output * patch_mask
             loss = F.mse_loss(output, patches)
@@ -109,7 +108,7 @@ class BoldGPT(nn.Module):
         """
         subind = batch["subject_id"]
         nsdind = batch["nsd_id"]
-        activity = batch["activity"]
+        images = batch["activity"] if self.modality == "bold" else batch["image"]
 
         patches = state["patches"]
         order = state["order"]
@@ -120,9 +119,9 @@ class BoldGPT(nn.Module):
         B, N = patches.shape[:2]
         device = patches.device
 
-        # Ensure activity is masked
+        # Ensure images are masked
         mask = self.patchify.mask
-        activity = mask * activity
+        images = mask * images
 
         # Unshuffle if necessary
         if order is not None:
@@ -137,22 +136,18 @@ class BoldGPT(nn.Module):
         order_map = self.patchify.inverse_vector(ranking.float() + 1.0)
         target = self.inverse_target(patches, tokens)
         recon = self.inverse_recon(output)
-        target_error = F.mse_loss(
-            activity[:, mask], target[:, mask], reduction="none"
-        ).mean(dim=1)
-        recon_error = F.mse_loss(
-            activity[:, mask], recon[:, mask], reduction="none"
-        ).mean(dim=1)
+        target_r2 = r2_score(target[:, mask], images[:, mask], reduction="none")
+        recon_r2 = r2_score(recon[:, mask], images[:, mask], reduction="none")
 
         examples = {
             "subject_id": subind,
             "nsd_id": nsdind,
-            "activity": activity,
+            "images": images,
             "order_map": order_map,
             "target": target,
             "recon": recon,
-            "target_error": target_error,
-            "recon_error": recon_error,
+            "target_r2": target_r2,
+            "recon_r2": recon_r2,
         }
         examples = {k: v.cpu().numpy() for k, v in examples.items()}
         return examples
@@ -185,14 +180,14 @@ class BoldGPT(nn.Module):
 
         subind = examples["subject_id"]
         nsdind = examples["nsd_id"]
-        activity = examples["activity"]
+        images = examples["images"]
         order_map = examples["order_map"]
         target = examples["target"]
         recon = examples["recon"]
-        target_error = examples["target_error"]
-        recon_error = examples["recon_error"]
+        target_r2 = examples["target_r2"]
+        recon_r2 = examples["recon_r2"]
 
-        B = activity.shape[0]
+        B = images.shape[0]
         plotw = 3.0
         ploth = 3.5
         nr = B
@@ -216,11 +211,11 @@ class BoldGPT(nn.Module):
 
             plt.sca(axs[ii, 1])
             tform = axs[ii, 1].transAxes
-            _imshow(activity[ii])
+            _imshow(images[ii])
             plt.text(
                 0.5,
                 0.98,
-                "Activity",
+                "Activity" if self.modality == "bold" else "Image",
                 ha="center",
                 va="top",
                 transform=tform,
@@ -236,7 +231,7 @@ class BoldGPT(nn.Module):
             plt.text(
                 0.98,
                 0.0,
-                f"mse={target_error[ii]:.2e}",
+                f"R2={target_r2[ii]:.2e}",
                 ha="right",
                 va="bottom",
                 transform=tform,
@@ -252,7 +247,7 @@ class BoldGPT(nn.Module):
             plt.text(
                 0.98,
                 0.0,
-                f"mse={recon_error[ii]:.2e}",
+                f"R2={recon_r2[ii]:.2e}",
                 ha="right",
                 va="bottom",
                 transform=tform,
@@ -330,7 +325,7 @@ def _create_bold_gpt(
         drop_path_rate=drop_path_rate,
     )
 
-    model = BoldGPT(patchify, tokenizer, decoder, shuffle=shuffle)
+    model = ImageGPT(patchify, tokenizer, decoder, shuffle=shuffle)
     return model
 
 

@@ -1,2 +1,2 @@
-from .boldgpt import BoldGPT  # noqa
+from .gpt import ImageGPT  # noqa
 from .registry import create_model, list_models  # noqa

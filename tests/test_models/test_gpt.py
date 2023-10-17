@@ -5,7 +5,7 @@ import matplotlib as mpl
 import pytest
 import torch
 
-from boldgpt.models import BoldGPT, create_model
+from boldgpt.models import ImageGPT, create_model
 from boldgpt.models.utils import get_no_decay_keys
 
 mpl.use("Agg")
@@ -19,7 +19,7 @@ RESULT_DIR.mkdir(exist_ok=True)
 def test_boldgpt(categorical: bool, training: bool):
     torch.manual_seed(42)
 
-    model: BoldGPT = create_model("boldgpt_tiny_patch10", categorical=categorical)
+    model: ImageGPT = create_model("boldgpt_tiny_patch10", categorical=categorical)
     logging.info("Model:\n%s", model)
 
     no_decay_keys = get_no_decay_keys(model)
@@ -32,7 +32,8 @@ def test_boldgpt(categorical: bool, training: bool):
     }
 
     model.train(training)
-    loss, state = model.forward(batch)
+    output, state = model.forward(batch)
+    loss = model.loss_fn(batch, output, state)
     logging.info("Loss: %.3e", loss.item())
 
     def get_shape(v):
