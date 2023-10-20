@@ -363,11 +363,15 @@ class Transformer(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            patches: input patches (B, N, P)
+            patches: input patches (B, N, D)
             sub_indices: subject indices (B,)
             context: context features (B, M, C)
             order: token order (B, N) or (N,)
             bool_masked_pos: masked token positions (B, N)
+
+        Returns:
+            output tensor (B, N+1, C), where the +1 is due to the prepended subject
+            token.
         """
         x = self.forward_features(
             patches,
@@ -377,8 +381,7 @@ class Transformer(nn.Module):
             bool_masked_pos=bool_masked_pos,
         )
 
-        # drop eos query prediction
-        x = self.forward_head(x)[:, :-1]
+        x = self.forward_head(x)
         return x
 
     def no_decay_keys(self) -> List[str]:

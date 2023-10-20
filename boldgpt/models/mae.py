@@ -3,7 +3,6 @@ from typing import Dict, Literal, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from matplotlib import colormaps
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
@@ -11,8 +10,6 @@ from torch import nn
 
 from boldgpt.data import load_nsd_flat_mask
 from boldgpt.patching import MaskedPatchify
-from boldgpt.shuffle import random_order, shuffle
-from boldgpt.tokenizer import KMeansTokenizer
 
 from .registry import register_model
 from .transformer import Transformer
@@ -22,27 +19,21 @@ CMAP = colormaps.get_cmap("turbo")
 CMAP.set_bad("gray")
 
 
-class ImageGPT(nn.Module):
+class MAE(nn.Module):
     def __init__(
         self,
         patchify: MaskedPatchify,
-        tokenizer: Optional[KMeansTokenizer],
-        decoder: Transformer,
-        shuffle: bool = True,
+        encoder: Transformer,
+        mask_ratio: Optional[float] = 0.75,
         modality: Literal["image", "bold"] = "bold",
     ):
         super().__init__()
-        self.shuffle = shuffle
+        self.mask_ratio = mask_ratio
         self.modality = modality
-        self.is_categorical = tokenizer is not None
-        self.with_sub_embed = decoder.with_sub_embed
+        self.with_sub_embed = encoder.with_sub_embed
 
         self.patchify = patchify
-        if tokenizer is None:
-            self.register_module("tokenizer", None)
-        else:
-            self.tokenizer = tokenizer
-        self.decoder = decoder
+        self.encoder = encoder
 
     def forward(
         self,
@@ -52,27 +43,26 @@ class ImageGPT(nn.Module):
         images = batch["activity"] if self.modality == "bold" else batch["image"]
         sub_indices = batch["subject_id"] if self.with_sub_embed else None
 
-        # Get patches and optionally tokens
+        # Get patches
         patches = self.patchify(images)
         B, N = patches.shape[:2]
         device = patches.device
-        if self.shuffle and self.training:
-            order, ranking = random_order(B, N, device=device)
-            patches = shuffle(patches, order)
-        else:
-            order = ranking = None
-        tokens = self.tokenizer(patches) if self.is_categorical else None
+
+        # Sample mask positions
+        bool_masked_pos = _sample_masked_pos(
+            B, N, mask_ratio=self.mask_ratio, device=device
+        )
 
         # Forward pass
-        output = self.decoder(patches, sub_indices=sub_indices, order=order)
-        # Drop the trailing EOS token
-        output = output[:, :-1]
+        output = self.encoder(
+            patches, sub_indices=sub_indices, bool_masked_pos=bool_masked_pos
+        )
+        # Drop the leading subject token
+        output = output[:, 1:]
 
         state = dict(
             patches=patches,
-            order=order,
-            ranking=ranking,
-            tokens=tokens,
+            bool_masked_pos=bool_masked_pos,
             output=output.detach(),
         )
         return output, state
@@ -83,18 +73,12 @@ class ImageGPT(nn.Module):
         output: torch.Tensor,
         state: Dict[str, Optional[torch.Tensor]],
     ) -> torch.Tensor:
-        if self.is_categorical:
-            tokens = state["tokens"]
-            loss = F.cross_entropy(output.flatten(0, 1), tokens.flatten())
-        else:
-            # Masked MSE loss
-            patches = state["patches"]
-            order = state["order"]
-            mask = self.patchify.patch_mask.expand_as(patches)
-            # If patches are shuffled, the mask must be shuffled as well.
-            if order is not None:
-                mask = shuffle(mask, order)
-            loss = torch.sum(mask * (output - patches) ** 2) / mask.sum()
+        patches = state["patches"]
+        bool_masked_pos = state["bool_masked_pos"]
+        # TODO: what about norm pix loss variant?
+        mask = self.patchify.patch_mask.expand_as(patches)
+        mask = mask & ~bool_masked_pos.unsqueeze(-1)
+        loss = torch.sum(mask * (output - patches) ** 2) / mask.sum()
         return loss
 
     def prepare_examples(
@@ -109,62 +93,36 @@ class ImageGPT(nn.Module):
         nsdind = batch["nsd_id"]
         images = batch["activity"] if self.modality == "bold" else batch["image"]
 
-        patches = state["patches"]
-        order = state["order"]
-        ranking = state["ranking"]
-        tokens = state["tokens"]
+        bool_masked_pos = state["bool_masked_pos"]
         output = state["output"]
-
-        B, N = patches.shape[:2]
-        device = patches.device
 
         # Ensure images are masked
         mask = self.patchify.mask
         images = mask * images
 
-        # Unshuffle if necessary
-        if order is not None:
-            patches = shuffle(patches, ranking)
-            if tokens is not None:
-                tokens = shuffle(tokens, ranking)
-            output = shuffle(output, ranking)
-        else:
-            ranking = torch.arange(N, device=device).expand(B, -1)
+        # Invert mask and get observed mask ratio
+        visible_mask = self.patchify.inverse_vector(~bool_masked_pos)
+        visible = visible_mask * images
+        mask_ratio = bool_masked_pos.float().mean(dim=1)
 
-        # Invert order, target, reconstruction and compute MSE
-        order_map = self.patchify.inverse_vector(ranking.float() + 1.0)
-        target = self.inverse_target(patches, tokens)
-        recon = self.inverse_recon(output)
-        target_r2 = r2_score(target[:, mask], images[:, mask], reduction="none")
-        recon_r2 = r2_score(recon[:, mask], images[:, mask], reduction="none")
+        # Get reconstruction and compute R^2
+        recon = self.patchify.inverse(output)
+        pred_mask = mask & ~visible_mask
+        recon_r2 = r2_score(
+            recon * pred_mask, images * pred_mask, dim=(1, 2), reduction="none"
+        )
 
         examples = {
             "subject_id": subind,
             "nsd_id": nsdind,
             "images": images,
-            "order_map": order_map,
-            "target": target,
+            "visible": visible,
+            "mask_ratio": mask_ratio,
             "recon": recon,
-            "target_r2": target_r2,
             "recon_r2": recon_r2,
         }
         examples = {k: v.cpu().numpy() for k, v in examples.items()}
         return examples
-
-    def inverse_target(
-        self, patches: torch.Tensor, tokens: Optional[torch.Tensor]
-    ) -> torch.Tensor:
-        if self.is_categorical:
-            patches = self.tokenizer.inverse(tokens)
-        target = self.patchify.inverse(patches)
-        return target
-
-    def inverse_recon(self, output: torch.Tensor) -> torch.Tensor:
-        if self.is_categorical:
-            pred = torch.argmax(output, dim=-1)
-            output = self.tokenizer.inverse(pred)
-        recon = self.patchify.inverse(output)
-        return recon
 
     def plot_examples(
         self,
@@ -180,17 +138,16 @@ class ImageGPT(nn.Module):
         subind = examples["subject_id"]
         nsdind = examples["nsd_id"]
         images = examples["images"]
-        order_map = examples["order_map"]
-        target = examples["target"]
+        visible = examples["visible"]
+        mask_ratio = examples["mask_ratio"]
         recon = examples["recon"]
-        target_r2 = examples["target_r2"]
         recon_r2 = examples["recon_r2"]
 
         B = images.shape[0]
         plotw = 3.0
         ploth = 3.5
         nr = B
-        nc = 4
+        nc = 3
         f, axs = plt.subplots(nr, nc, figsize=(nc * plotw, nr * ploth), squeeze=False)
 
         textdict = {"fontsize": 10, "color": "w"}
@@ -200,16 +157,6 @@ class ImageGPT(nn.Module):
 
             plt.sca(axs[ii, 0])
             tform = axs[ii, 0].transAxes
-            _imshow(order_map[ii])
-            plt.text(
-                0.5, 0.98, "Order", ha="center", va="top", transform=tform, **textdict
-            )
-            plt.text(
-                0.02, 0.0, label, ha="left", va="bottom", transform=tform, **textdict
-            )
-
-            plt.sca(axs[ii, 1])
-            tform = axs[ii, 1].transAxes
             _imshow(images[ii])
             plt.text(
                 0.5,
@@ -220,25 +167,28 @@ class ImageGPT(nn.Module):
                 transform=tform,
                 **textdict,
             )
-
-            plt.sca(axs[ii, 2])
-            tform = axs[ii, 2].transAxes
-            _imshow(target[ii])
             plt.text(
-                0.5, 0.98, "Target", ha="center", va="top", transform=tform, **textdict
+                0.02, 0.0, label, ha="left", va="bottom", transform=tform, **textdict
+            )
+
+            plt.sca(axs[ii, 1])
+            tform = axs[ii, 1].transAxes
+            _imshow(visible[ii])
+            plt.text(
+                0.5, 0.98, "Visible", ha="center", va="top", transform=tform, **textdict
             )
             plt.text(
                 0.98,
                 0.0,
-                f"R2={target_r2[ii]:.2e}",
+                f"MR={mask_ratio[ii]:.2f}",
                 ha="right",
                 va="bottom",
                 transform=tform,
                 **textdict,
             )
 
-            plt.sca(axs[ii, 3])
-            tform = axs[ii, 3].transAxes
+            plt.sca(axs[ii, 2])
+            tform = axs[ii, 2].transAxes
             _imshow(recon[ii])
             plt.text(
                 0.5, 0.98, "Pred", ha="center", va="top", transform=tform, **textdict
@@ -260,10 +210,20 @@ class ImageGPT(nn.Module):
         return f
 
     def extra_repr(self) -> str:
-        return (
-            f"is_categorical={self.is_categorical}, shuffle={self.shuffle}, "
-            f"modality={self.modality}"
-        )
+        return f"mask_ratio={self.mask_ratio}, modality={self.modality}"
+
+
+def _sample_masked_pos(
+    batch_size: int,
+    num_patches: int,
+    mask_ratio: Optional[float] = 0.5,
+    device: torch.device = None,
+) -> torch.Tensor:
+    # Per-sample mask ratio between 0 and 1
+    if mask_ratio is None:
+        mask_ratio = torch.rand(batch_size, 1, device=device)
+    bool_masked_pos = torch.rand(batch_size, num_patches, device=device) < mask_ratio
+    return bool_masked_pos
 
 
 def _imshow(img: np.ndarray, **kwargs):
@@ -273,15 +233,13 @@ def _imshow(img: np.ndarray, **kwargs):
     plt.axis("off")
 
 
-def _create_bold_gpt(
+def _create_bold_mae(
     *,
     mask: Optional[np.ndarray] = None,
     patch_size: int = 10,
     ordering: str = "radial",
-    categorical: bool = True,
     with_sub_embed: bool = True,
-    vocab_size: int = 1024,
-    shuffle: bool = True,
+    mask_ratio: Optional[float] = 0.75,
     num_subs: int = 8,
     embed_dim: int = 768,
     depth: int = 12,
@@ -301,25 +259,20 @@ def _create_bold_gpt(
         mask = load_nsd_flat_mask()
     patchify = MaskedPatchify(mask, patch_size=patch_size, ordering=ordering)
 
-    if categorical:
-        tokenizer = KMeansTokenizer(vocab_size=vocab_size, dim=patchify.dim)
-    else:
-        tokenizer = None
-
-    decoder = Transformer(
+    encoder = Transformer(
         num_patches=patchify.num_patches,
         in_features=patchify.dim,
         num_subs=num_subs,
-        num_classes=(vocab_size if categorical else patchify.dim),
+        num_classes=patchify.dim,
         embed_dim=embed_dim,
         depth=depth,
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
         with_sub_embed=with_sub_embed,
-        with_next_pos=shuffle,
+        with_next_pos=False,
         with_cross=False,
-        is_causal=True,
-        is_masked=False,
+        is_causal=False,
+        is_masked=True,
         drop_rate=drop_rate,
         sub_drop_rate=sub_drop_rate,
         proj_drop_rate=proj_drop_rate,
@@ -327,29 +280,29 @@ def _create_bold_gpt(
         drop_path_rate=drop_path_rate,
     )
 
-    model = ImageGPT(patchify, tokenizer, decoder, shuffle=shuffle)
+    model = MAE(patchify, encoder, mask_ratio=mask_ratio)
     return model
 
 
 @register_model
-def boldgpt_tiny_patch10(**kwargs):
+def boldmae_tiny_patch10(**kwargs):
     model_kwargs = dict(
         patch_size=10, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4.0
     )
-    return _create_bold_gpt(**kwargs, **model_kwargs)
+    return _create_bold_mae(**kwargs, **model_kwargs)
 
 
 @register_model
-def boldgpt_small_patch10(**kwargs):
+def boldmae_small_patch10(**kwargs):
     model_kwargs = dict(
         patch_size=10, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4.0
     )
-    return _create_bold_gpt(**kwargs, **model_kwargs)
+    return _create_bold_mae(**kwargs, **model_kwargs)
 
 
 @register_model
-def boldgpt_base_patch10(**kwargs):
+def boldmae_base_patch10(**kwargs):
     model_kwargs = dict(
         patch_size=10, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4.0
     )
-    return _create_bold_gpt(**kwargs, **model_kwargs)
+    return _create_bold_mae(**kwargs, **model_kwargs)
