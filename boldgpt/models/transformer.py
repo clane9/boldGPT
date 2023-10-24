@@ -185,6 +185,7 @@ class Transformer(nn.Module):
         num_patches: int,
         in_features: int,
         num_subs: int = 1024,
+        num_registers: int = 0,
         num_classes: int = 4096,
         embed_dim: int = 768,
         depth: int = 12,
@@ -205,6 +206,7 @@ class Transformer(nn.Module):
         self.num_patches = num_patches
         self.in_features = in_features
         self.num_subs = num_subs
+        self.num_registers = num_registers
         self.num_classes = num_classes
         self.embed_dim = embed_dim
         self.with_sub_embed = with_sub_embed
@@ -223,9 +225,14 @@ class Transformer(nn.Module):
         self.pos_embed = nn.Parameter(torch.empty(num_patches, embed_dim))
         if with_next_pos:
             self.next_pos_query = nn.Parameter(torch.empty(num_patches, embed_dim))
+            self.eos_query = nn.Parameter(torch.empty(1, embed_dim))
         else:
             self.register_parameter("next_pos_query", None)
-        self.eos_query = nn.Parameter(torch.empty(1, embed_dim))
+            self.register_parameter("eos_query", None)
+        if num_registers > 0:
+            self.reg_embed = nn.Parameter(torch.empty(num_registers, embed_dim))
+        else:
+            self.register_parameter("reg_embed", None)
         self.sub_drop = TokenDropout(p=sub_drop_rate)
         if is_masked:
             self.mask_token = nn.Parameter(torch.empty(1, 1, embed_dim))
@@ -268,7 +275,9 @@ class Transformer(nn.Module):
         trunc_normal_(self.pos_embed, std=0.02)
         if self.with_next_pos:
             trunc_normal_(self.next_pos_query, std=0.02)
-        trunc_normal_(self.eos_query, std=0.02)
+            trunc_normal_(self.eos_query, std=0.02)
+        if self.num_registers > 0:
+            trunc_normal_(self.reg_embed, std=0.02)
         self.apply(self._init_weights)
 
     def _init_weights(self, module: nn.Module):
@@ -326,7 +335,25 @@ class Transformer(nn.Module):
             eos_query = self.eos_query.expand(B, -1, -1)
             next_pos_query = torch.cat([next_pos_query, eos_query], dim=1)
             x = x + next_pos_query
+
+        # append registers
+        if self.num_registers > 0:
+            reg_embed = self.reg_embed.expand(B, -1, -1)
+            x = torch.cat([x, reg_embed], dim=1)
         return x
+
+    def _get_attn_mask(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        L = x.size(-2)
+        device = x.device
+
+        # Allow global attention between sequence and registers
+        if self.is_causal and self.num_registers > 0:
+            attn_mask = torch.ones(L, L, dtype=torch.bool, device=device).tril_()
+            attn_mask[:, -self.num_registers :] = True
+            attn_mask[-self.num_registers :, :] = True
+        else:
+            attn_mask = None
+        return attn_mask
 
     def forward_features(
         self,
@@ -342,8 +369,11 @@ class Transformer(nn.Module):
             x = self._mask_pos(x, bool_masked_pos)
         x = self._pos_embed(x, sub_indices, order)
 
+        attn_mask = self._get_attn_mask(x)
+        is_causal = self.is_causal and attn_mask is None
+
         for block in self.blocks:
-            x = block(x, context=context, is_causal=self.is_causal)
+            x = block(x, context=context, is_causal=is_causal, attn_mask=attn_mask)
 
         x = self.norm(x)
         return x
@@ -402,12 +432,17 @@ class Transformer(nn.Module):
                 "pos_embed",
                 "next_pos_query",
                 "eos_query",
+                "reg_embed",
             }
         ]
         return keys
 
     def extra_repr(self) -> str:
         return (
-            f"with_next_pos={self.with_next_pos}, with_cross={self.with_cross}, "
-            f"is_caual={self.is_causal}, is_masked={self.is_masked}"
+            f"num_registers={self.num_registers}, "
+            f"with_sub_embed={self.with_sub_embed}, "
+            f"with_next_pos={self.with_next_pos}, "
+            f"with_cross={self.with_cross}, "
+            f"is_caual={self.is_causal}, "
+            f"is_masked={self.is_masked}"
         )

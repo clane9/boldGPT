@@ -12,6 +12,7 @@ def test_boldgpt():
         num_patches=100,
         in_features=64,
         num_subs=1024,
+        num_registers=4,
         num_classes=512,
         embed_dim=192,
         depth=4,
@@ -39,7 +40,7 @@ def test_boldgpt():
     y = model.forward(
         x, sub_indices, context=context, order=order, bool_masked_pos=bool_masked_pos
     )
-    assert y.shape == (16, 101, 512)
+    assert y.shape == (16, 105, 512)
 
     no_decay_keys = set(model.no_decay_keys())
     decay_keys = [
