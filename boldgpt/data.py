@@ -1,3 +1,4 @@
+from collections import defaultdict
 from functools import lru_cache
 from importlib import resources
 from typing import Dict, List, Optional
@@ -5,6 +6,9 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 from datasets import Dataset, load_dataset
+from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from torchvision import transforms
+from torchvision.transforms import InterpolationMode
 
 import boldgpt.resources
 
@@ -30,6 +34,34 @@ class ActivityTransform(torch.nn.Module):
         act = (act - self.vmin) / (self.vmax - self.vmin)
         act = (act * 255.0).to(torch.uint8)
         return act
+
+
+class Collate(torch.nn.Module):
+    def __init__(
+        self,
+        image_transform: Optional[torch.nn.Module] = None,
+        activity_transform: Optional[torch.nn.Module] = None,
+    ):
+        super().__init__()
+        self.image_transform = image_transform
+        self.activity_transform = activity_transform
+
+    def forward(self, batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        collated = defaultdict(list)
+        for sample in batch:
+            for k, v in sample.items():
+                collated[k].append(v)
+
+        if "image" in collated and self.image_transform is not None:
+            collated["image"] = [self.image_transform(img) for img in collated["image"]]
+
+        if "activity" in collated and self.activity_transform is not None:
+            collated["activity"] = [
+                self.activity_transform(img) for img in collated["activity"]
+            ]
+
+        collated = {k: torch.stack(v) for k, v in collated.items()}
+        return collated
 
 
 @lru_cache
@@ -71,7 +103,6 @@ def load_nsd_flat(
         split: ds.select(ind, keep_in_memory=keep_in_memory)
         for split, ind in split_indices_map.items()
     }
-
     return dsets
 
 
@@ -80,3 +111,21 @@ def get_mask(activity: torch.Tensor):
     Get the mask of pixels with fMRI data (not all zero across the first dimension).
     """
     return ~torch.all(activity == 127, dim=0)
+
+
+def get_default_collate() -> Collate:
+    """
+    Get the default collate function for NSD flat.
+    """
+    return Collate(
+        image_transform=transforms.Compose(
+            [
+                transforms.Resize(224, interpolation=InterpolationMode.BICUBIC),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD
+                ),
+            ]
+        ),
+        activity_transform=ActivityTransform(),
+    )

@@ -97,6 +97,7 @@ class ImageGPT(nn.Module):
             loss = torch.sum(mask * (output - patches) ** 2) / mask.sum()
         return loss
 
+    @torch.no_grad()
     def prepare_examples(
         self,
         batch: Dict[str, torch.Tensor],
@@ -190,7 +191,7 @@ class ImageGPT(nn.Module):
         plotw = 3.0
         ploth = 3.5
         nr = B
-        nc = 4
+        nc = 4 if self.is_categorical else 3
         f, axs = plt.subplots(nr, nc, figsize=(nc * plotw, nr * ploth), squeeze=False)
 
         textdict = {"fontsize": 10, "color": "w"}
@@ -221,24 +222,32 @@ class ImageGPT(nn.Module):
                 **textdict,
             )
 
-            plt.sca(axs[ii, 2])
-            tform = axs[ii, 2].transAxes
-            _imshow(target[ii])
-            plt.text(
-                0.5, 0.98, "Target", ha="center", va="top", transform=tform, **textdict
-            )
-            plt.text(
-                0.98,
-                0.0,
-                f"R2={target_r2[ii]:.2e}",
-                ha="right",
-                va="bottom",
-                transform=tform,
-                **textdict,
-            )
+            if self.is_categorical:
+                plt.sca(axs[ii, 2])
+                tform = axs[ii, 2].transAxes
+                _imshow(target[ii])
+                plt.text(
+                    0.5,
+                    0.98,
+                    "Target",
+                    ha="center",
+                    va="top",
+                    transform=tform,
+                    **textdict,
+                )
+                plt.text(
+                    0.98,
+                    0.0,
+                    f"R2={target_r2[ii]:.2e}",
+                    ha="right",
+                    va="bottom",
+                    transform=tform,
+                    **textdict,
+                )
 
-            plt.sca(axs[ii, 3])
-            tform = axs[ii, 3].transAxes
+            col = 3 if self.is_categorical else 2
+            plt.sca(axs[ii, col])
+            tform = axs[ii, col].transAxes
             _imshow(recon[ii])
             plt.text(
                 0.5, 0.98, "Pred", ha="center", va="top", transform=tform, **textdict
@@ -282,7 +291,7 @@ def _create_bold_gpt(
     with_sub_embed: bool = True,
     vocab_size: int = 1024,
     shuffle: bool = True,
-    num_subs: int = 8,
+    num_subs: int = 1024,
     embed_dim: int = 768,
     depth: int = 12,
     num_heads: int = 12,

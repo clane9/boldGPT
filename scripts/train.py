@@ -5,16 +5,14 @@ import shutil
 import sys
 import time
 from argparse import Namespace
-from collections import defaultdict
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-import wandb
 import yaml
 from hf_argparser import HfArg, HfArgumentParser
 from matplotlib import pyplot as plt
@@ -25,7 +23,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 
-from boldgpt.data import ActivityTransform, load_nsd_flat, load_nsd_flat_mask
+import wandb
+from boldgpt.data import get_default_collate, load_nsd_flat, load_nsd_flat_mask
 from boldgpt.models import ImageGPT, create_model, list_models
 from boldgpt.models.utils import get_no_decay_keys
 from boldgpt.utils import ClusterInfo, get_exp_name, get_sha, seed_hash, setup_logging
@@ -56,7 +55,7 @@ class Args:
         aliases=["--vstate"], default=None, help="tokenizer vocab state to load"
     )
     shuffle: Optional[bool] = HfArg(
-        default=False, help="shuffle patch ordering on each iteration"
+        default=True, help="shuffle patch ordering on each iteration"
     )
     with_sub_embed: bool = HfArg(
         aliases=["--sub"], default=True, help="learn subject-specific embedding"
@@ -186,7 +185,9 @@ def main(args: Args):
 
     # Datasets and loaders
     logging.info("Loading NSD-Flat dataset")
-    dsets = load_nsd_flat(keep_in_memory=clust.device.type == "cuda")
+    dsets = load_nsd_flat(
+        keep_in_memory=(clust.device.type == "cuda" and not args.debug)
+    )
     for split, ds in dsets.items():
         logging.info("%s samples: %d", split.capitalize(), len(ds))
     mask = load_nsd_flat_mask()
@@ -196,7 +197,7 @@ def main(args: Args):
     )
 
     loaders = {}
-    transform = ActivityTransform()
+    collate = get_default_collate()
     if clust.ddp:
         samplers = {
             "train": DistributedSampler(dsets["train"], shuffle=True),
@@ -212,7 +213,7 @@ def main(args: Args):
             sampler=samplers[split],
             num_workers=args.workers,
             pin_memory=clust.use_cuda,
-            collate_fn=Collate(transform),
+            collate_fn=collate,
             drop_last=True,  # helpful for torch.compile
         )
 
@@ -243,7 +244,7 @@ def main(args: Args):
 
         logging.info("Loading tokenizer vocab state: %s", args.vocab_state)
         state_dict = torch.load(args.vocab_state, map_location=clust.device)
-        model.tokenizer.load_state_dict(state_dict)
+        model.tokenizer.load_state_dict({"vocab": state_dict["vocab"]})
 
     # Optimizer
     logging.info("Creating optimizer")
@@ -329,23 +330,6 @@ def main(args: Args):
         destroy_process_group()
 
 
-class Collate(torch.nn.Module):
-    def __init__(self, transform: torch.nn.Module):
-        super().__init__()
-        self.transform = transform
-
-    def forward(self, batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-        collated = defaultdict(list)
-        for sample in batch:
-            for k, v in sample.items():
-                collated[k].append(v)
-
-        collated["activity"] = [self.transform(act) for act in collated["activity"]]
-
-        collated = {k: torch.stack(v) for k, v in collated.items()}
-        return collated
-
-
 def create_optimizer(
     args: Args, model: ImageGPT
 ) -> Tuple[torch.optim.Optimizer, List[str]]:
@@ -422,7 +406,7 @@ def train(
         need_update = is_last_batch or (batch_idx + 1) % accum_steps == 0
         if batch_idx >= last_batch_idx_to_accum:
             accum_steps = last_accum_steps
-        batch = {k: to_device(v) for k, v in batch.items()}
+        batch = {k: to_device(v, clust.device) for k, v in batch.items()}
         batch_size = len(batch["subject_id"])
         data_time = time.monotonic() - end
 
