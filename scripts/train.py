@@ -260,6 +260,7 @@ def main(args: Args):
         start_epoch = 0
         best_metric = float("inf")
 
+    model_unwrap = model
     if clust.ddp:
         model = DDP(model, device_ids=[clust.local_rank])
 
@@ -282,6 +283,7 @@ def main(args: Args):
             args=args,
             epoch=epoch,
             model=model,
+            model_unwrap=model_unwrap,
             train_loader=loaders["train"],
             optimizer=optimizer,
             clust=clust,
@@ -295,6 +297,7 @@ def main(args: Args):
             epoch=epoch,
             step=(epoch + 1) * epoch_steps,
             model=model,
+            model_unwrap=model_unwrap,
             val_loader=loaders["val"],
             clust=clust,
             out_dir=out_dir,
@@ -359,7 +362,8 @@ def create_optimizer(
 def train(
     args: Args,
     epoch: int,
-    model: ImageGPT,
+    model: Union[DDP, ImageGPT],
+    model_unwrap: ImageGPT,
     train_loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     clust: ClusterInfo,
@@ -412,7 +416,7 @@ def train(
 
         with autocast():
             output, state = model(batch)
-            loss = model.loss_fn(batch, output, state)
+            loss = model_unwrap.loss_fn(batch, output, state)
 
         if clust.ddp:
             loss_item = reduce_tensor(loss.detach(), clust.world_size).item()
@@ -452,7 +456,7 @@ def train(
         step_time_m.update(step_time, batch_size)
 
         if clust.master_process and batch_idx == 0 and args.figures:
-            examples = model.prepare_examples(batch, state)
+            examples = model_unwrap.prepare_examples(batch, state)
 
         if (step % LOG_INTERVAL == 0 and need_update) or is_last_batch or args.debug:
             tput = (clust.world_size * args.batch_size) / step_time_m.avg
@@ -498,7 +502,9 @@ def train(
     if clust.master_process and args.figures:
         example_path = out_dir / "figures" / f"train_examples-{epoch:04d}.png"
         example_path.parent.mkdir(exist_ok=True)
-        model.plot_examples(examples, num_examples=NUM_EXAMPLES, fname=example_path)
+        model_unwrap.plot_examples(
+            examples, num_examples=NUM_EXAMPLES, fname=example_path
+        )
 
         if args.wandb:
             wandb.log(
@@ -513,7 +519,8 @@ def validate(
     args: Args,
     epoch: int,
     step: int,
-    model: ImageGPT,
+    model: Union[DDP, ImageGPT],
+    model_unwrap: ImageGPT,
     val_loader: DataLoader,
     clust: ClusterInfo,
     out_dir: Path,
@@ -536,7 +543,7 @@ def validate(
 
         # Predict and compute loss
         output, state = model(batch)
-        loss = model.loss_fn(batch, output, state)
+        loss = model_unwrap.loss_fn(batch, output, state)
         if clust.ddp:
             loss_item = reduce_tensor(loss.detach(), clust.world_size).item()
         else:
@@ -552,7 +559,7 @@ def validate(
         step_time_m.update(step_time, batch_size)
 
         if clust.master_process and batch_idx == 0 and args.figures:
-            examples = model.prepare_examples(batch, state)
+            examples = model_unwrap.prepare_examples(batch, state)
 
         if (
             batch_idx % LOG_INTERVAL == 0
@@ -597,7 +604,9 @@ def validate(
 
     if clust.master_process and args.figures:
         example_path = out_dir / "figures" / f"val_examples-{epoch:04d}.png"
-        model.plot_examples(examples, num_examples=NUM_EXAMPLES, fname=example_path)
+        model_unwrap.plot_examples(
+            examples, num_examples=NUM_EXAMPLES, fname=example_path
+        )
 
         if args.wandb:
             wandb.log(
