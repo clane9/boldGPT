@@ -65,8 +65,8 @@ class ImageGPT(nn.Module):
 
         # Forward pass
         output = self.decoder(patches, sub_indices=sub_indices, order=order)
-        # Drop the trailing EOS token
-        output = output[:, :-1]
+        # Drop the trailing EOS token (and any registers)
+        output = output[:, :N]
 
         state = dict(
             patches=patches,

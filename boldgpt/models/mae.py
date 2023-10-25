@@ -57,8 +57,8 @@ class MAE(nn.Module):
         output = self.encoder(
             patches, sub_indices=sub_indices, bool_masked_pos=bool_masked_pos
         )
-        # Drop the leading subject token
-        output = output[:, 1:]
+        # Drop the leading subject token (and any registers)
+        output = output[:, 1 : N + 1]
 
         state = dict(
             patches=patches,
