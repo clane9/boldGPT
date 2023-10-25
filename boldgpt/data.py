@@ -12,12 +12,6 @@ from torchvision.transforms import InterpolationMode
 
 import boldgpt.resources
 
-from .utils import generate_splits
-
-NUM_SAMPLES = 195000
-SPLIT_SIZES = {"train": 0.95, "val": 0.05}
-SPLIT_SEED = 42
-
 
 class ActivityTransform(torch.nn.Module):
     def __init__(self, vmin: float = -2.5, vmax: float = 2.5):
@@ -67,12 +61,15 @@ class Collate(torch.nn.Module):
 @lru_cache
 def load_nsd_flat_splits() -> Dict[str, torch.Tensor]:
     """
-    Load NSD-Flat split indices.
+    Load NSD-Flat split indices. Validation samples are those from shared1000.
     """
-    split_indices = generate_splits(
-        NUM_SAMPLES, list(SPLIT_SIZES.values()), seed=SPLIT_SEED
-    )
-    split_indices_map = {split: ind for split, ind in zip(SPLIT_SIZES, split_indices)}
+    ds = load_dataset("clane9/NSD-Flat", split="train")
+    ds.set_format("torch")
+    shared1000_mask = ds["shared1000"]
+    split_indices_map = {
+        "train": torch.where(~shared1000_mask)[0],
+        "val": torch.where(shared1000_mask)[0],
+    }
     return split_indices_map
 
 
