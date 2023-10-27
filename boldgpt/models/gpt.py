@@ -14,6 +14,7 @@ from boldgpt.patching import MaskedPatchify
 from boldgpt.shuffle import random_order, shuffle
 from boldgpt.tokenizer import KMeansTokenizer
 
+from . import constants as C
 from .registry import register_model
 from .transformer import Transformer
 from .utils import r2_score
@@ -282,13 +283,15 @@ def _imshow(img: np.ndarray, **kwargs):
     plt.axis("off")
 
 
-def _create_bold_gpt(
+def _create_image_gpt(
     *,
+    modality: str = "bold",
     mask: Optional[np.ndarray] = None,
+    img_size: int = 224,
     patch_size: int = 10,
-    ordering: str = "radial",
+    ordering: Optional[str] = None,
     categorical: bool = True,
-    with_sub_embed: bool = True,
+    with_sub_embed: Optional[bool] = None,
     vocab_size: int = 1024,
     shuffle: bool = True,
     num_subs: int = 1024,
@@ -307,8 +310,17 @@ def _create_bold_gpt(
     if kwargs:
         logging.warning("Extra unused kwargs: %s", kwargs)
 
+    is_bold = modality == "bold"
     if mask is None:
-        mask = load_nsd_flat_mask()
+        if is_bold:
+            mask = load_nsd_flat_mask()
+        else:
+            mask = torch.ones(img_size, img_size, dtype=torch.bool)
+    if ordering is None:
+        ordering = "radial" if is_bold else "reverse_radial"
+    if with_sub_embed is None:
+        with_sub_embed = is_bold
+
     patchify = MaskedPatchify(mask, patch_size=patch_size, ordering=ordering)
 
     if categorical:
@@ -338,29 +350,47 @@ def _create_bold_gpt(
         drop_path_rate=drop_path_rate,
     )
 
-    model = ImageGPT(patchify, tokenizer, decoder, shuffle=shuffle)
+    model = ImageGPT(patchify, tokenizer, decoder, shuffle=shuffle, modality=modality)
     return model
 
 
 @register_model
 def boldgpt_tiny_patch10(**kwargs):
-    model_kwargs = dict(
-        patch_size=10, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4.0
+    return _create_image_gpt(
+        modality="bold", patch_size=10, **C.TINY_ARCH_KWARGS, **kwargs
     )
-    return _create_bold_gpt(**kwargs, **model_kwargs)
 
 
 @register_model
 def boldgpt_small_patch10(**kwargs):
-    model_kwargs = dict(
-        patch_size=10, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4.0
+    return _create_image_gpt(
+        modality="bold", patch_size=10, **C.SMALL_ARCH_KWARGS, **kwargs
     )
-    return _create_bold_gpt(**kwargs, **model_kwargs)
 
 
 @register_model
 def boldgpt_base_patch10(**kwargs):
-    model_kwargs = dict(
-        patch_size=10, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4.0
+    return _create_image_gpt(
+        modality="bold", patch_size=10, **C.BASE_ARCH_KWARGS, **kwargs
     )
-    return _create_bold_gpt(**kwargs, **model_kwargs)
+
+
+@register_model
+def imagegpt_tiny_patch16(**kwargs):
+    return _create_image_gpt(
+        modality="image", patch_size=16, **C.TINY_ARCH_KWARGS, **kwargs
+    )
+
+
+@register_model
+def imagegpt_small_patch16(**kwargs):
+    return _create_image_gpt(
+        modality="image", patch_size=16, **C.SMALL_ARCH_KWARGS, **kwargs
+    )
+
+
+@register_model
+def imagegpt_base_patch16(**kwargs):
+    return _create_image_gpt(
+        modality="image", patch_size=16, **C.BASE_ARCH_KWARGS, **kwargs
+    )

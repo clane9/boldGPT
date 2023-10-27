@@ -11,6 +11,7 @@ from torch import nn
 from boldgpt.data import load_nsd_flat_mask
 from boldgpt.patching import MaskedPatchify
 
+from . import constants as C
 from .registry import register_model
 from .transformer import Transformer
 from .utils import r2_score
@@ -233,14 +234,16 @@ def _imshow(img: np.ndarray, **kwargs):
     plt.axis("off")
 
 
-def _create_bold_mae(
+def _create_mae(
     *,
+    modality: str = "bold",
     mask: Optional[np.ndarray] = None,
+    img_size: int = 224,
     patch_size: int = 10,
-    ordering: str = "radial",
-    with_sub_embed: bool = True,
+    ordering: Optional[str] = None,
+    with_sub_embed: Optional[bool] = None,
     mask_ratio: Optional[float] = 0.75,
-    num_subs: int = 8,
+    num_subs: int = 1024,
     num_registers: int = 0,
     embed_dim: int = 768,
     depth: int = 12,
@@ -256,8 +259,17 @@ def _create_bold_mae(
     if kwargs:
         logging.warning("Extra unused kwargs: %s", kwargs)
 
+    is_bold = modality == "bold"
     if mask is None:
-        mask = load_nsd_flat_mask()
+        if is_bold:
+            mask = load_nsd_flat_mask()
+        else:
+            mask = torch.ones(img_size, img_size, dtype=torch.bool)
+    if ordering is None:
+        ordering = "radial" if is_bold else "reverse_radial"
+    if with_sub_embed is None:
+        with_sub_embed = is_bold
+
     patchify = MaskedPatchify(mask, patch_size=patch_size, ordering=ordering)
 
     encoder = Transformer(
@@ -282,29 +294,35 @@ def _create_bold_mae(
         drop_path_rate=drop_path_rate,
     )
 
-    model = MAE(patchify, encoder, mask_ratio=mask_ratio)
+    model = MAE(patchify, encoder, mask_ratio=mask_ratio, modality=modality)
     return model
 
 
 @register_model
 def boldmae_tiny_patch10(**kwargs):
-    model_kwargs = dict(
-        patch_size=10, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4.0
-    )
-    return _create_bold_mae(**kwargs, **model_kwargs)
+    return _create_mae(modality="bold", patch_size=10, **C.TINY_ARCH_KWARGS, **kwargs)
 
 
 @register_model
 def boldmae_small_patch10(**kwargs):
-    model_kwargs = dict(
-        patch_size=10, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4.0
-    )
-    return _create_bold_mae(**kwargs, **model_kwargs)
+    return _create_mae(modality="bold", patch_size=10, **C.SMALL_ARCH_KWARGS, **kwargs)
 
 
 @register_model
 def boldmae_base_patch10(**kwargs):
-    model_kwargs = dict(
-        patch_size=10, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4.0
-    )
-    return _create_bold_mae(**kwargs, **model_kwargs)
+    return _create_mae(modality="bold", patch_size=10, **C.BASE_ARCH_KWARGS, **kwargs)
+
+
+@register_model
+def imagemae_tiny_patch16(**kwargs):
+    return _create_mae(modality="image", patch_size=16, **C.TINY_ARCH_KWARGS, **kwargs)
+
+
+@register_model
+def imagemae_small_patch16(**kwargs):
+    return _create_mae(modality="image", patch_size=16, **C.SMALL_ARCH_KWARGS, **kwargs)
+
+
+@register_model
+def imagemae_base_patch16(**kwargs):
+    return _create_mae(modality="image", patch_size=16, **C.BASE_ARCH_KWARGS, **kwargs)

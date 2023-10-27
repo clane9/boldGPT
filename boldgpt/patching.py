@@ -5,7 +5,7 @@ import torch
 from einops.layers.torch import Rearrange
 from torch import nn
 
-ORDERINGS = ("raster", "radial", "random")
+ORDERINGS = ("raster", "radial", "reverse_radial", "random")
 
 
 class MaskedPatchify(nn.Module):
@@ -16,6 +16,7 @@ class MaskedPatchify(nn.Module):
 
     - raster: original image raster order
     - radial: patches sorted by distance from mask centroid
+    - reverse_radial: reverse of radial
     - random: fixed random patch ordering
 
     Or you can pass a custom priority tensor, shape (H, W), to determine the order.
@@ -85,6 +86,9 @@ class MaskedPatchify(nn.Module):
             order = torch.arange(self.num_patches, device=device)
         elif ordering == "radial":
             priority = distance_map(mask)
+            order = self._priority_order(priority, patch_indices)
+        elif ordering == "reverse_radial":
+            priority = -distance_map(mask)
             order = self._priority_order(priority, patch_indices)
         elif ordering == "random":
             order = torch.randperm(self.num_patches, device=device)
