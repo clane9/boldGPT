@@ -24,16 +24,6 @@ Humans struggle to "see" the structure in functional MRI (BOLD) brain maps. Our 
 - Image-to-BOLD, i.e. fMRI encoding. See also the [Algonauts 2023 challenge](http://algonauts.csail.mit.edu/).
 - BOLD-to-Image, i.e. fMRI image reconstruction. See also [MindEye](https://github.com/MedARC-AI/fMRI-reconstruction-NSD).
 
-## Preliminary results
-
-**Training examples for discrete token targets.**
-![Train examples](.github/images/230914153355-numerous-horse_train_examples_89999.png)
-
-
-**Training examples for continuous patch targets.**
-![Train examples](.github/images/231024085643-stocky-coffeeshop_train_examples_48779.png)
-
-
 ## Installation
 
 Clone the repo and install the package in a new virtual environment
