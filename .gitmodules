@@ -1,3 +1,3 @@
-[submodule "models/boldgpt_small_patch10"]
+[submodule "models/boldgpt_small_patch10.kmq"]
 	path = models/boldgpt_small_patch10.kmq
-	url = git@hf.co:clane9/boldgpt_small_patch10
+	url = git@hf.co:clane9/boldgpt_small_patch10.kmq
