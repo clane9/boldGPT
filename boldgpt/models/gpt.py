@@ -15,7 +15,7 @@ from boldgpt.shuffle import random_order, shuffle
 from boldgpt.tokenizer import KMeansTokenizer
 
 from . import constants as C
-from .registry import register_model
+from .registry import register_configs, register_model
 from .transformer import Transformer
 from .utils import r2_score
 
@@ -394,3 +394,13 @@ def imagegpt_base_patch16(**kwargs):
     return _create_image_gpt(
         modality="image", patch_size=16, **C.BASE_ARCH_KWARGS, **kwargs
     )
+
+
+CONFIGS = {
+    "boldgpt_small_patch10.kmq": {
+        "has_weights": True,
+        "kwargs": {"categorical": True},
+    },
+}
+
+register_configs(CONFIGS)
