@@ -12,19 +12,21 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT License"}
 dependencies = [
+    "datasets",
+    "einops",
+    "hf-argparser",
+    "huggingface-hub",
+    "matplotlib",
     "numpy",
-    "pandas",
     "Pillow",
-    "pycocotools",
-    "pycortex",
-    "scikit-image",
+    "safetensors",
     "scikit-learn",
     "scipy",
-    "shapely",
     "timm",
     "torch",
     "torchvision",
     "tqdm",
+    "wandb",
 ]
 dynamic = ["version"]
 
