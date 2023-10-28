@@ -1,3 +1,6 @@
 [submodule "models/boldgpt_small_patch10.kmq"]
 	path = models/boldgpt_small_patch10.kmq
 	url = git@hf.co:clane9/boldgpt_small_patch10.kmq
+[submodule "models/boldgpt_small_patch10.cont"]
+	path = models/boldgpt_small_patch10.cont
+	url = git@hf.co:clane9/boldgpt_small_patch10.cont

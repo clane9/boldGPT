@@ -401,6 +401,10 @@ CONFIGS = {
         "has_weights": True,
         "kwargs": {"categorical": True},
     },
+    "boldgpt_small_patch10.cont": {
+        "has_weights": True,
+        "kwargs": {"categorical": False},
+    },
 }
 
 register_configs(CONFIGS)
