@@ -18,7 +18,7 @@ def random_order(
     return order, ranking
 
 
-def shuffle(input: torch.Tensor, order: torch.Tensor) -> torch.Tensor:
+def permute(input: torch.Tensor, order: torch.Tensor) -> torch.Tensor:
     """
     Shuffle the items in an input sequence, shape (B, N, [C]), by order, shape (B, N).
     """

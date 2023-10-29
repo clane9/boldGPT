@@ -304,7 +304,7 @@ class Transformer(nn.Module):
         order: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert (
-            order is None or self.with_next_pos
+            order is None or not self.is_causal or self.with_next_pos
         ), "Must set with_next_pos=True for non-default patch order"
         assert (
             sub_indices is None or self.with_sub_embed

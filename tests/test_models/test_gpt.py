@@ -34,13 +34,8 @@ def test_boldgpt(categorical: bool, training: bool):
     model.train(training)
     output, state = model.forward(batch)
     loss = model.loss_fn(batch, output, state)
+
     logging.info("Loss: %.3e", loss.item())
-
-    def get_shape(v):
-        if isinstance(v, torch.Tensor):
-            return tuple(v.shape)
-        return v
-
     logging.info("State:\n%s", {k: get_shape(v) for k, v in state.items()})
 
     examples = model.prepare_examples(batch, state)
@@ -49,6 +44,27 @@ def test_boldgpt(categorical: bool, training: bool):
         num_examples=3,
         fname=RESULT_DIR / f"examples_cat-{categorical}_train-{training}.png",
     )
+
+
+@pytest.mark.parametrize("categorical", [True, False])
+def test_boldgpt_generate(categorical: bool):
+    torch.manual_seed(42)
+    model: ImageGPT = create_model("boldgpt_tiny_patch10", categorical=categorical)
+    batch = {
+        "activity": torch.randn(1, 215, 200),
+        "subject_id": torch.arange(1),
+        "nsd_id": torch.arange(1),
+    }
+    pred, state = model.generate(batch, shuffle=True)
+
+    logging.info("Pred: %s", pred.shape)
+    logging.info("State:\n%s", {k: get_shape(v) for k, v in state.items()})
+
+
+def get_shape(v):
+    if isinstance(v, torch.Tensor):
+        return tuple(v.shape)
+    return v
 
 
 if __name__ == "__main__":

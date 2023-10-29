@@ -11,10 +11,11 @@ from torch import nn
 
 from boldgpt.data import load_nsd_flat_mask
 from boldgpt.patching import MaskedPatchify
-from boldgpt.shuffle import random_order, shuffle
+from boldgpt.shuffle import permute, random_order
 from boldgpt.tokenizer import KMeansTokenizer
 
 from . import constants as C
+from .generate import generate
 from .registry import register_configs, register_model
 from .transformer import Transformer
 from .utils import r2_score
@@ -59,7 +60,7 @@ class ImageGPT(nn.Module):
         device = patches.device
         if self.shuffle and self.training:
             order, ranking = random_order(B, N, device=device)
-            patches = shuffle(patches, order)
+            patches = permute(patches, order)
         else:
             order = ranking = None
         tokens = self.tokenizer(patches) if self.is_categorical else None
@@ -94,9 +95,69 @@ class ImageGPT(nn.Module):
             mask = self.patchify.patch_mask.expand_as(patches)
             # If patches are shuffled, the mask must be shuffled as well.
             if order is not None:
-                mask = shuffle(mask, order)
+                mask = permute(mask, order)
             loss = torch.sum(mask * (output - patches) ** 2) / mask.sum()
         return loss
+
+    @torch.no_grad()
+    def generate(
+        self,
+        batch: Dict[str, torch.Tensor],
+        prompt_fraction: float = 0.25,
+        shuffle: bool = False,
+        order: Optional[torch.Tensor] = None,
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, Optional[torch.Tensor]]]:
+        if not self.shuffle and (shuffle or order is not None):
+            raise ValueError(
+                "Must train with shuffled patches to generate with "
+                "shuffled/custom order"
+            )
+
+        images = batch["activity"] if self.modality == "bold" else batch["image"]
+        sub_indices = batch["subject_id"] if self.with_sub_embed else None
+
+        patches = self.patchify(images)
+        B, N = patches.shape[:2]
+        device = patches.device
+
+        if shuffle:
+            order, ranking = random_order(B, N, device=device)
+        elif order is not None:
+            ranking = torch.argsort(order, dim=1)
+        else:
+            ranking = None
+
+        if order is not None:
+            patches = permute(patches, order)
+        prompt_length = int(prompt_fraction * N)
+        prompt = patches[:, :prompt_length]
+
+        pred = generate(
+            model=self.decoder,
+            prompt=prompt,
+            sub_indices=sub_indices,
+            order=order,
+            tokenizer=self.tokenizer,
+            offset=0,
+            temperature=temperature,
+            top_k=top_k,
+        )
+
+        if order is not None:
+            recon = permute(pred, ranking)
+        recon = self.patchify.inverse(recon)
+
+        state = {
+            "patches": patches,
+            "order": order,
+            "ranking": ranking,
+            "prompt_length": prompt_length,
+            "pred": pred,
+            "recon": recon,
+        }
+        return recon, state
 
     @torch.no_grad()
     def prepare_examples(
@@ -126,17 +187,24 @@ class ImageGPT(nn.Module):
 
         # Unshuffle if necessary
         if order is not None:
-            patches = shuffle(patches, ranking)
+            patches = permute(patches, ranking)
             if tokens is not None:
-                tokens = shuffle(tokens, ranking)
-            output = shuffle(output, ranking)
+                tokens = permute(tokens, ranking)
+            output = permute(output, ranking)
         else:
             ranking = torch.arange(N, device=device).expand(B, -1)
 
         # Invert order, target, reconstruction and compute MSE
         order_map = self.patchify.inverse_vector(ranking.float() + 1.0)
-        target = self.inverse_target(patches, tokens)
-        recon = self.inverse_recon(output)
+        if self.is_categorical:
+            target = self.tokenizer.inverse(tokens)
+            pred = torch.argmax(output, dim=-1)
+            recon = self.tokenizer.inverse(pred)
+        else:
+            target = patches
+            recon = output
+        target = self.patchify.inverse(target)
+        recon = self.patchify.inverse(recon)
         target_r2 = r2_score(target[:, mask], images[:, mask], reduction="none")
         recon_r2 = r2_score(recon[:, mask], images[:, mask], reduction="none")
 
@@ -152,21 +220,6 @@ class ImageGPT(nn.Module):
         }
         examples = {k: v.cpu().numpy() for k, v in examples.items()}
         return examples
-
-    def inverse_target(
-        self, patches: torch.Tensor, tokens: Optional[torch.Tensor]
-    ) -> torch.Tensor:
-        if self.is_categorical:
-            patches = self.tokenizer.inverse(tokens)
-        target = self.patchify.inverse(patches)
-        return target
-
-    def inverse_recon(self, output: torch.Tensor) -> torch.Tensor:
-        if self.is_categorical:
-            pred = torch.argmax(output, dim=-1)
-            output = self.tokenizer.inverse(pred)
-        recon = self.patchify.inverse(output)
-        return recon
 
     def plot_examples(
         self,
