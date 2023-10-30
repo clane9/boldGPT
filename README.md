@@ -17,7 +17,7 @@ Humans struggle to "see" the structure in functional MRI (BOLD) brain maps. Our 
 
   The shuffling idea is somewhat new, although see also [SAIM](https://github.com/qiy20/SAIM/tree/main) and [RandSAC](https://arxiv.org/abs/2203.12054). Our main innovation compared to these works is the use of a [next position query embedding](boldgpt/models/transformer.py).
 
-- Masked patch prediction following [MAE](https://github.com/facebookresearch/mae) ([`MAE`](boldgpt/models/mae.py))
+- Masked patch prediction following [BEiT](https://arxiv.org/abs/2106.08254) ([`BEiT`](boldgpt/models/beit.py))
 
 **Evaluation.** We are primarily interested in two downstream tasks:
 

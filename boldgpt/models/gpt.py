@@ -89,7 +89,6 @@ class ImageGPT(nn.Module):
             tokens = state["tokens"]
             loss = F.cross_entropy(output.flatten(0, 1), tokens.flatten())
         else:
-            # Masked MSE loss
             patches = state["patches"]
             order = state["order"]
             mask = self.patchify.patch_mask.expand_as(patches)
@@ -194,7 +193,7 @@ class ImageGPT(nn.Module):
         else:
             ranking = torch.arange(N, device=device).expand(B, -1)
 
-        # Invert order, target, reconstruction and compute MSE
+        # Invert order, target, reconstruction and compute R^2
         order_map = self.patchify.inverse_vector(ranking.float() + 1.0)
         if self.is_categorical:
             target = self.tokenizer.inverse(tokens)
@@ -292,7 +291,7 @@ class ImageGPT(nn.Module):
                 plt.text(
                     0.98,
                     0.0,
-                    f"R2={target_r2[ii]:.2e}",
+                    f"R2={target_r2[ii]:.3f}",
                     ha="right",
                     va="bottom",
                     transform=tform,
@@ -309,7 +308,7 @@ class ImageGPT(nn.Module):
             plt.text(
                 0.98,
                 0.0,
-                f"R2={recon_r2[ii]:.2e}",
+                f"R2={recon_r2[ii]:.3f}",
                 ha="right",
                 va="bottom",
                 transform=tform,
