@@ -2,7 +2,9 @@ from typing import Optional
 
 import torch
 
-from ..tokenizer import KMeansTokenizer
+from boldgpt.shuffle import permute
+from boldgpt.tokenizer import KMeansTokenizer
+
 from .transformer import Transformer
 
 
@@ -14,6 +16,7 @@ def generate(
     context: Optional[torch.Tensor] = None,
     order: Optional[torch.Tensor] = None,
     tokenizer: Optional[KMeansTokenizer] = None,
+    patch_mask: Optional[torch.Tensor] = None,
     offset: int = 0,
     temperature: float = 1.0,
     top_k: Optional[int] = None,
@@ -38,7 +41,7 @@ def generate(
     # To sample we always pass a full-length sequence. But we mask the trailing tokens.
     # This way, we can potentially sample from an MAE as well as a GPT. The extra
     # compute cost should not be a big deal (?).
-    x = torch.zeros(B, model.num_patches, model.in_features, device=device)
+    samples = torch.zeros(B, model.num_patches, model.in_features, device=device)
     if model.is_masked:
         bool_mask_pos = torch.ones(
             B, model.num_patches, dtype=torch.bool, device=device
@@ -46,15 +49,23 @@ def generate(
     else:
         bool_mask_pos = None
 
+    if patch_mask is not None:
+        assert patch_mask.shape == samples.shape[1:], "Expected patch mask shape (N, D)"
+        patch_mask = patch_mask.expand_as(samples)
+        if order is not None:
+            patch_mask = permute(patch_mask, order)
+
     start = prompt.size(1)
     if start > 0:
-        x[:, :start] = prompt
+        samples[:, :start] = prompt
         if model.is_masked:
             bool_mask_pos[:, :start] = False
 
     for idx in range(start, model.num_patches):
+        samples = patch_mask * samples
+
         output = model(
-            x,
+            samples,
             sub_indices=sub_indices,
             context=context,
             order=order,
@@ -65,11 +76,9 @@ def generate(
 
         if is_categorical:
             tokens = sample_tokens(output, temperature=temperature, top_k=top_k)
-            patches = tokenizer.inverse(tokens)
-        else:
-            patches = output
-        x[:, idx : idx + 1] = patches
-    return x
+            output = tokenizer.inverse(tokens)
+        samples[:, idx : idx + 1] = output
+    return samples
 
 
 def sample_tokens(
