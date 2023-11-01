@@ -6,7 +6,7 @@ import torch
 from boldgpt.models.transformer import Transformer
 
 
-def test_boldgpt():
+def test_transformer():
     # Small model with all bells and whistles
     model = Transformer(
         num_patches=100,
@@ -15,6 +15,7 @@ def test_boldgpt():
         num_registers=4,
         num_classes=512,
         embed_dim=192,
+        context_dim=256,
         depth=4,
         num_heads=3,
         with_next_pos=True,
@@ -33,7 +34,7 @@ def test_boldgpt():
     x = torch.randn(16, 100, 64)
     sub_indices = torch.arange(16)
 
-    context = torch.randn(16, 50, 192)
+    context = torch.randn(16, 50, 256)
     order = torch.argsort(torch.rand(16, 100), dim=1)
     bool_masked_pos = torch.rand(16, 100) > 0.5
 

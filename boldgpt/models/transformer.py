@@ -159,7 +159,7 @@ class Block(nn.Module):
         x = x + self.drop_path1(y)
 
         if context is not None:
-            y = self.ls2(self.cross(self.norm2(x), context))
+            y = self.ls2(self.cross(self.norm2(x), context=context))
             x = x + self.drop_path2(y)
 
         y = self.ls3(self.mlp(self.norm3(x)))
@@ -188,6 +188,7 @@ class Transformer(nn.Module):
         num_registers: int = 0,
         num_classes: int = 4096,
         embed_dim: int = 768,
+        context_dim: int = 768,
         depth: int = 12,
         num_heads: int = 12,
         mlp_ratio: float = 4.0,
@@ -209,6 +210,7 @@ class Transformer(nn.Module):
         self.num_registers = num_registers
         self.num_classes = num_classes
         self.embed_dim = embed_dim
+        self.context_dim = context_dim
         self.with_sub_embed = with_sub_embed
         self.with_next_pos = with_next_pos
         self.with_cross = with_cross
@@ -216,6 +218,10 @@ class Transformer(nn.Module):
         self.is_masked = is_masked
 
         self.patch_embed = nn.Linear(in_features, embed_dim)
+        if self.with_cross:
+            self.cross_embed = nn.Linear(context_dim, embed_dim)
+        else:
+            self.register_module("cross_embed", None)
 
         self.group_token = nn.Parameter(torch.empty(1, 1, embed_dim))
         if with_sub_embed:
@@ -363,7 +369,12 @@ class Transformer(nn.Module):
         order: Optional[torch.Tensor] = None,
         bool_masked_pos: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert (
+            context is None or self.with_cross
+        ), "Must set with_cross=True to use context"
         x = self.patch_embed(x)
+        if context is not None:
+            context = self.cross_embed(context)
 
         if bool_masked_pos is not None:
             x = self._mask_pos(x, bool_masked_pos)
