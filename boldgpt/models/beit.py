@@ -135,6 +135,7 @@ class BEiT(nn.Module):
             sub_indices=sub_indices,
             order=order,
             tokenizer=self.tokenizer,
+            patch_mask=self.patchify.patch_mask,
             offset=1,
             temperature=temperature,
             top_k=top_k,

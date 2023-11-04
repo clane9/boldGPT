@@ -64,6 +64,10 @@ def generate(
     for idx in range(start, model.num_patches):
         samples = patch_mask * samples
 
+        # TODO: For auto-regressive generation, we should be able to do this much more
+        # efficiently. The forward pass for the leading tokens is always the same as the
+        # previous iteration (assuming no forward pass randomness). So we should be able
+        # to provide just the pre-kv hidden states for each block as context.
         output = model(
             samples,
             sub_indices=sub_indices,

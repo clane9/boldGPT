@@ -9,10 +9,11 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch
+from PIL import Image
 
 from .slug import random_slug
 
@@ -172,3 +173,48 @@ def get_exp_name(prefix: str, seed: int):
         name = name + "-" + prefix
     name = name + "-" + random_slug(seed=seed)
     return name
+
+
+def resize_and_pad(
+    img: Union[Image.Image, np.ndarray], target_shape: Tuple[int, int]
+) -> Image.Image:
+    """
+    Resize an image to a target shape (h, w) while preserving aspect, padding as
+    necessary.
+    """
+    if isinstance(img, np.ndarray):
+        img = to_pil_image(img)
+    h, w = target_shape
+    target_ratio = w / h
+    img_ratio = img.width / img.height
+
+    # Determine the dimensions to which the image should be resized
+    if img_ratio > target_ratio:
+        # The image is wider than the target aspect ratio
+        new_width = w
+        new_height = round(w / img_ratio)
+    else:
+        # The image is taller than the target aspect ratio
+        new_height = h
+        new_width = round(h * img_ratio)
+
+    # Resize the image
+    img = img.resize((new_width, new_height), Image.BICUBIC)
+
+    # Create a new image with the target size and black background
+    new_img = Image.new("RGB", (w, h), color="gray")
+
+    # Get the position to paste the resized image on the background
+    paste_x = (w - new_width) // 2
+    paste_y = (h - new_height) // 2
+
+    # Paste the resized image onto the center of the background
+    new_img.paste(img, (paste_x, paste_y))
+    return new_img
+
+
+def to_pil_image(img: np.ndarray) -> Image.Image:
+    img = (img - img.min()) / (img.max() - img.min())
+    img = (255 * img).astype(np.uint8)
+    img = Image.fromarray(img)
+    return img

@@ -41,7 +41,7 @@ def test_boldbeit(categorical: bool, mask_ratio: Optional[float]):
     model.plot_examples(
         examples,
         num_examples=3,
-        fname=RESULT_DIR / f"examples_cat-{categorical}_mr-{mask_ratio}.png",
+        fname=RESULT_DIR / f"examples_beit_cat-{categorical}_mr-{mask_ratio}.png",
     )
 
 

@@ -1,7 +1,8 @@
 import logging
-from typing import Dict, Literal, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple, Union
 
 import numpy as np
+import timm
 import torch
 import torch.nn.functional as F
 from matplotlib import colormaps
@@ -10,9 +11,11 @@ from matplotlib.figure import Figure
 from torch import nn
 
 from boldgpt.data import load_nsd_flat_mask
+from boldgpt.features import FeatureExtractor
 from boldgpt.patching import MaskedPatchify
 from boldgpt.shuffle import permute, random_order
 from boldgpt.tokenizer import KMeansTokenizer
+from boldgpt.utils import resize_and_pad
 
 from . import constants as C
 from .generate import generate
@@ -30,6 +33,8 @@ class ImageGPT(nn.Module):
         patchify: MaskedPatchify,
         tokenizer: Optional[KMeansTokenizer],
         decoder: Transformer,
+        encoder: Optional[nn.Module] = None,
+        layer: Optional[str] = None,
         shuffle: bool = True,
         modality: Literal["image", "bold"] = "bold",
     ):
@@ -37,6 +42,7 @@ class ImageGPT(nn.Module):
         self.shuffle = shuffle
         self.modality = modality
         self.is_categorical = tokenizer is not None
+        self.is_seq2seq = encoder is not None
         self.with_sub_embed = decoder.with_sub_embed
 
         self.patchify = patchify
@@ -46,12 +52,22 @@ class ImageGPT(nn.Module):
             self.tokenizer = tokenizer
         self.decoder = decoder
 
+        if encoder is None:
+            self.register_module("encoder", None)
+        else:
+            assert layer, "layer is required when using an encoder"
+            self.encoder = encoder
+            self.extractor = FeatureExtractor(encoder, layers=[layer])
+        self.layer = layer
+
     def forward(
         self,
         batch: Dict[str, torch.Tensor],
     ) -> Tuple[torch.Tensor, Dict[str, Optional[torch.Tensor]]]:
         # Unpack data
         images = batch["activity"] if self.modality == "bold" else batch["image"]
+        if self.is_seq2seq:
+            inputs = batch["image"] if self.modality == "bold" else batch["activity"]
         sub_indices = batch["subject_id"] if self.with_sub_embed else None
 
         # Get patches and optionally tokens
@@ -65,8 +81,17 @@ class ImageGPT(nn.Module):
             order = ranking = None
         tokens = self.tokenizer(patches) if self.is_categorical else None
 
+        # Get encoder context
+        if self.is_seq2seq:
+            _, features = self.extractor(inputs)
+            context = features[self.layer]
+        else:
+            context = None
+
         # Forward pass
-        output = self.decoder(patches, sub_indices=sub_indices, order=order)
+        output = self.decoder(
+            patches, sub_indices=sub_indices, context=context, order=order
+        )
         # Drop the trailing EOS token (and any registers)
         output = output[:, :N]
 
@@ -75,7 +100,8 @@ class ImageGPT(nn.Module):
             order=order,
             ranking=ranking,
             tokens=tokens,
-            output=output.detach(),
+            context=context,
+            output=output,
         )
         return output, state
 
@@ -105,6 +131,7 @@ class ImageGPT(nn.Module):
         prompt_fraction: float = 0.25,
         shuffle: bool = False,
         order: Optional[torch.Tensor] = None,
+        context: Optional[torch.Tensor] = None,
         temperature: float = 1.0,
         top_k: Optional[int] = None,
     ) -> Tuple[torch.Tensor, Dict[str, Optional[torch.Tensor]]]:
@@ -115,6 +142,8 @@ class ImageGPT(nn.Module):
             )
 
         images = batch["activity"] if self.modality == "bold" else batch["image"]
+        if self.is_seq2seq:
+            inputs = batch["image"] if self.modality == "bold" else batch["activity"]
         sub_indices = batch["subject_id"] if self.with_sub_embed else None
 
         patches = self.patchify(images)
@@ -133,30 +162,37 @@ class ImageGPT(nn.Module):
         prompt_length = int(prompt_fraction * N)
         prompt = patches[:, :prompt_length]
 
-        pred = generate(
+        # Get encoder context
+        if self.is_seq2seq and context is None:
+            _, features = self.extractor(inputs)
+            context = features[self.layer]
+
+        sample = generate(
             model=self.decoder,
             prompt=prompt,
             sub_indices=sub_indices,
+            context=context,
             order=order,
             tokenizer=self.tokenizer,
+            patch_mask=self.patchify.patch_mask,
             offset=0,
             temperature=temperature,
             top_k=top_k,
         )
 
         if order is not None:
-            recon = permute(pred, ranking)
-        recon = self.patchify.inverse(recon)
+            sample = permute(sample, ranking)
+        sample = self.patchify.inverse(sample)
 
         state = {
             "patches": patches,
             "order": order,
             "ranking": ranking,
             "prompt_length": prompt_length,
-            "pred": pred,
-            "recon": recon,
+            "context": context,
+            "sample": sample,
         }
-        return recon, state
+        return sample, state
 
     @torch.no_grad()
     def prepare_examples(
@@ -170,12 +206,17 @@ class ImageGPT(nn.Module):
         subind = batch["subject_id"]
         nsdind = batch["nsd_id"]
         images = batch["activity"] if self.modality == "bold" else batch["image"]
+        if self.is_seq2seq:
+            inputs = batch["image"] if self.modality == "bold" else batch["activity"]
+        else:
+            inputs = None
 
         patches = state["patches"]
         order = state["order"]
         ranking = state["ranking"]
         tokens = state["tokens"]
-        output = state["output"]
+        context = state["context"]
+        output = state["output"].detach()
 
         B, N = patches.shape[:2]
         device = patches.device
@@ -204,20 +245,34 @@ class ImageGPT(nn.Module):
             recon = output
         target = self.patchify.inverse(target)
         recon = self.patchify.inverse(recon)
+        # TODO: This won't work if images have a channels dim since mask is 2D
         target_r2 = r2_score(target[:, mask], images[:, mask], reduction="none")
         recon_r2 = r2_score(recon[:, mask], images[:, mask], reduction="none")
+
+        # TODO: Actually doing generation as currently implemented will be too expensive
+        # to do for each epoch.
+        sample, _ = self.generate(
+            batch=batch,
+            prompt_fraction=0.0 if self.is_seq2seq else 0.25,
+            order=order,
+            context=context,
+        )
+        sample_r2 = r2_score(sample[:, mask], images[:, mask], reduction="none")
 
         examples = {
             "subject_id": subind,
             "nsd_id": nsdind,
             "images": images,
+            "inputs": inputs,
             "order_map": order_map,
             "target": target,
             "recon": recon,
+            "sample": sample,
             "target_r2": target_r2,
             "recon_r2": recon_r2,
+            "sample_r2": sample_r2,
         }
-        examples = {k: v.cpu().numpy() for k, v in examples.items()}
+        examples = {k: _to_numpy(v) for k, v in examples.items()}
         return examples
 
     def plot_examples(
@@ -229,41 +284,58 @@ class ImageGPT(nn.Module):
         """
         Plot a grid of samples and predictions.
         """
-        examples = {k: v[:num_examples] for k, v in examples.items()}
-
         subind = examples["subject_id"]
         nsdind = examples["nsd_id"]
         images = examples["images"]
+        inputs = examples["inputs"]
         order_map = examples["order_map"]
         target = examples["target"]
         recon = examples["recon"]
+        sample = examples["sample"]
         target_r2 = examples["target_r2"]
         recon_r2 = examples["recon_r2"]
+        sample_r2 = examples["sample_r2"]
 
-        B = images.shape[0]
+        img_shape = images.shape[-2:]
         plotw = 3.0
         ploth = 3.5
-        nr = B
-        nc = 4 if self.is_categorical else 3
+        nr = num_examples
+        # Extra plots depending on model
+        nc = 4 + self.is_seq2seq + self.is_categorical
         f, axs = plt.subplots(nr, nc, figsize=(nc * plotw, nr * ploth), squeeze=False)
 
-        textdict = {"fontsize": 10, "color": "w"}
+        textdict = {
+            "fontsize": 10,
+            "color": "w",
+            "bbox": {
+                "boxstyle": "square",
+                "fc": (0.5, 0.5, 0.5),
+                "ec": "none",
+                "pad": 0,
+            },
+        }
 
-        for ii in range(B):
+        for ii in range(num_examples):
             label = f"sub{subind[ii]+1:02d} nsd{nsdind[ii]:05d}"
+            col = 0
 
-            plt.sca(axs[ii, 0])
-            tform = axs[ii, 0].transAxes
-            _imshow(order_map[ii])
-            plt.text(
-                0.5, 0.98, "Order", ha="center", va="top", transform=tform, **textdict
-            )
-            plt.text(
-                0.02, 0.0, label, ha="left", va="bottom", transform=tform, **textdict
-            )
+            if self.is_seq2seq:
+                plt.sca(axs[ii, col])
+                tform = axs[ii, col].transAxes
+                _imshow(inputs[ii], img_shape=img_shape)
+                plt.text(
+                    0.5,
+                    0.98,
+                    "Image" if self.modality == "bold" else "Activity",
+                    ha="center",
+                    va="top",
+                    transform=tform,
+                    **textdict,
+                )
+                col += 1
 
-            plt.sca(axs[ii, 1])
-            tform = axs[ii, 1].transAxes
+            plt.sca(axs[ii, col])
+            tform = axs[ii, col].transAxes
             _imshow(images[ii])
             plt.text(
                 0.5,
@@ -274,10 +346,11 @@ class ImageGPT(nn.Module):
                 transform=tform,
                 **textdict,
             )
+            col += 1
 
             if self.is_categorical:
-                plt.sca(axs[ii, 2])
-                tform = axs[ii, 2].transAxes
+                plt.sca(axs[ii, col])
+                tform = axs[ii, col].transAxes
                 _imshow(target[ii])
                 plt.text(
                     0.5,
@@ -297,8 +370,8 @@ class ImageGPT(nn.Module):
                     transform=tform,
                     **textdict,
                 )
+                col += 1
 
-            col = 3 if self.is_categorical else 2
             plt.sca(axs[ii, col])
             tform = axs[ii, col].transAxes
             _imshow(recon[ii])
@@ -314,6 +387,35 @@ class ImageGPT(nn.Module):
                 transform=tform,
                 **textdict,
             )
+            col += 1
+
+            plt.sca(axs[ii, col])
+            tform = axs[ii, col].transAxes
+            _imshow(sample[ii])
+            plt.text(
+                0.5, 0.98, "Sample", ha="center", va="top", transform=tform, **textdict
+            )
+            plt.text(
+                0.98,
+                0.0,
+                f"R2={sample_r2[ii]:.3f}",
+                ha="right",
+                va="bottom",
+                transform=tform,
+                **textdict,
+            )
+            col += 1
+
+            plt.sca(axs[ii, col])
+            tform = axs[ii, col].transAxes
+            _imshow(order_map[ii])
+            plt.text(
+                0.5, 0.98, "Order", ha="center", va="top", transform=tform, **textdict
+            )
+            plt.text(
+                0.04, 0.0, label, ha="left", va="bottom", transform=tform, **textdict
+            )
+            col += 1
 
         plt.tight_layout(pad=0.2, h_pad=0.05)
 
@@ -323,14 +425,29 @@ class ImageGPT(nn.Module):
 
     def extra_repr(self) -> str:
         return (
-            f"is_categorical={self.is_categorical}, shuffle={self.shuffle}, "
+            f"is_categorical={self.is_categorical}, "
+            f"is_seq2seq={self.is_seq2seq}, "
+            f"shuffle={self.shuffle}, "
             f"modality={self.modality}"
         )
 
 
-def _imshow(img: np.ndarray, **kwargs):
+def _to_numpy(x: Optional[torch.Tensor]) -> Optional[np.ndarray]:
+    if x is not None:
+        x = x.detach().cpu().numpy()
+    return x
+
+
+def _imshow(img: np.ndarray, img_shape: Optional[Tuple[int, int]] = None, **kwargs):
     kwargs = {"interpolation": "nearest", "cmap": CMAP, **kwargs}
-    img = np.where(img == 0, np.nan, img)
+    if img.ndim == 2:
+        # (H, W)
+        img = np.where(img == 0, np.nan, img)
+    else:
+        # (C, H, W)
+        img = np.transpose(img, (1, 2, 0))
+    if img_shape and img.shape[-2:] != img_shape:
+        img = resize_and_pad(img, img_shape)
     plt.imshow(img, **kwargs)
     plt.axis("off")
 
@@ -346,9 +463,13 @@ def _create_image_gpt(
     with_sub_embed: Optional[bool] = None,
     vocab_size: int = 1024,
     shuffle: bool = True,
+    encoder: Optional[Union[str, nn.Module]] = None,
+    encoder_kwargs: Optional[Dict[str, Any]] = None,
+    layer: Optional[str] = None,
     num_subs: int = 1024,
     num_registers: int = 0,
     embed_dim: int = 768,
+    context_dim: int = 768,
     depth: int = 12,
     num_heads: int = 12,
     mlp_ratio: float = 4.0,
@@ -380,6 +501,11 @@ def _create_image_gpt(
     else:
         tokenizer = None
 
+    if isinstance(encoder, str):
+        encoder_kwargs = encoder_kwargs or {}
+        encoder_kwargs = {"pretrained": True, **encoder_kwargs}
+        encoder = timm.create_model(encoder, **encoder_kwargs)
+
     decoder = Transformer(
         num_patches=patchify.num_patches,
         in_features=patchify.dim,
@@ -387,12 +513,13 @@ def _create_image_gpt(
         num_registers=num_registers,
         num_classes=(vocab_size if categorical else patchify.dim),
         embed_dim=embed_dim,
+        context_dim=context_dim,
         depth=depth,
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
         with_sub_embed=with_sub_embed,
         with_next_pos=shuffle,
-        with_cross=False,
+        with_cross=encoder is not None,
         is_causal=True,
         is_masked=False,
         drop_rate=drop_rate,
@@ -402,7 +529,15 @@ def _create_image_gpt(
         drop_path_rate=drop_path_rate,
     )
 
-    model = ImageGPT(patchify, tokenizer, decoder, shuffle=shuffle, modality=modality)
+    model = ImageGPT(
+        patchify=patchify,
+        tokenizer=tokenizer,
+        decoder=decoder,
+        encoder=encoder,
+        layer=layer,
+        shuffle=shuffle,
+        modality=modality,
+    )
     return model
 
 
@@ -445,6 +580,46 @@ def imagegpt_small_patch16(**kwargs):
 def imagegpt_base_patch16(**kwargs):
     return _create_image_gpt(
         modality="image", patch_size=16, **C.BASE_ARCH_KWARGS, **kwargs
+    )
+
+
+_EVA02_ENCODER_KWARGS = {
+    "encoder": "eva02_base_patch14_224.mim_in22k",
+    "layer": "blocks.8",
+    "context_dim": 768,
+}
+
+
+@register_model
+def image2bold_tiny_patch10(**kwargs):
+    return _create_image_gpt(
+        modality="bold",
+        patch_size=10,
+        **_EVA02_ENCODER_KWARGS,
+        **C.TINY_ARCH_KWARGS,
+        **kwargs,
+    )
+
+
+@register_model
+def image2bold_small_patch10(**kwargs):
+    return _create_image_gpt(
+        modality="bold",
+        patch_size=10,
+        **_EVA02_ENCODER_KWARGS,
+        **C.SMALL_ARCH_KWARGS,
+        **kwargs,
+    )
+
+
+@register_model
+def image2bold_base_patch10(**kwargs):
+    return _create_image_gpt(
+        modality="bold",
+        patch_size=10,
+        **_EVA02_ENCODER_KWARGS,
+        **C.BASE_ARCH_KWARGS,
+        **kwargs,
     )
 
 
