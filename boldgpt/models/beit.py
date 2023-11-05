@@ -11,11 +11,9 @@ from torch import nn
 
 from boldgpt.data import load_nsd_flat_mask
 from boldgpt.patching import MaskedPatchify
-from boldgpt.shuffle import permute, random_order
 from boldgpt.tokenizer import KMeansTokenizer
 
 from . import constants as C
-from .generate import generate
 from .registry import register_model
 from .transformer import Transformer
 from .utils import r2_score
@@ -99,61 +97,6 @@ class BEiT(nn.Module):
             mask = mask & state["bool_masked_pos"].unsqueeze(-1)
             loss = torch.sum(mask * (output - patches) ** 2) / mask.sum()
         return loss
-
-    @torch.no_grad()
-    def generate(
-        self,
-        batch: Dict[str, torch.Tensor],
-        prompt_fraction: float = 0.25,
-        shuffle: bool = False,
-        order: Optional[torch.Tensor] = None,
-        temperature: float = 1.0,
-        top_k: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, Dict[str, Optional[torch.Tensor]]]:
-        images = batch["activity"] if self.modality == "bold" else batch["image"]
-        sub_indices = batch["subject_id"] if self.with_sub_embed else None
-
-        patches = self.patchify(images)
-        B, N = patches.shape[:2]
-        device = patches.device
-
-        if shuffle:
-            order, ranking = random_order(B, N, device=device)
-        elif order is not None:
-            ranking = torch.argsort(order, dim=1)
-        else:
-            ranking = None
-
-        if order is not None:
-            patches = permute(patches, order)
-        prompt_length = int(prompt_fraction * N)
-        prompt = patches[:, :prompt_length]
-
-        pred = generate(
-            model=self.encoder,
-            prompt=prompt,
-            sub_indices=sub_indices,
-            order=order,
-            tokenizer=self.tokenizer,
-            patch_mask=self.patchify.patch_mask,
-            offset=1,
-            temperature=temperature,
-            top_k=top_k,
-        )
-
-        if order is not None:
-            recon = permute(pred, ranking)
-        recon = self.patchify.inverse(recon)
-
-        state = {
-            "patches": patches,
-            "order": order,
-            "ranking": ranking,
-            "prompt_length": prompt_length,
-            "pred": pred,
-            "recon": recon,
-        }
-        return recon, state
 
     @torch.no_grad()
     def prepare_examples(

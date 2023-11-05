@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -45,18 +45,24 @@ class Attention(nn.Module):
         context: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
         is_causal: bool = False,
-    ) -> torch.Tensor:
+        kv_cache: Optional[torch.Tensor] = None,
+        return_kv: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         B, N, C = x.shape
         if context is None:
             context = x
         M = context.size(1)
 
+        # (B, num_heads, N, head_dim)
         q = self.q(x).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        # (2, B, num_heads, M, head_dim)
         kv = (
             self.kv(context)
             .reshape(B, M, 2, self.num_heads, self.head_dim)
             .permute(2, 0, 3, 1, 4)
         )
+        if kv_cache is not None:
+            kv = torch.cat([kv_cache, kv], dim=3)
         k, v = kv.unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
 
@@ -72,6 +78,9 @@ class Attention(nn.Module):
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
+
+        if return_kv:
+            return x, kv
         return x
 
 
@@ -148,6 +157,11 @@ class Block(nn.Module):
         )
         self.drop_path3 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
+        # Decoding related cache and flags
+        self._kv_cache: Optional[torch.Tensor] = None
+        self._is_decoding = False
+        self._use_cache = True
+
     def forward(
         self,
         x: torch.Tensor,
@@ -155,7 +169,27 @@ class Block(nn.Module):
         attn_mask: Optional[torch.Tensor] = None,
         is_causal: bool = False,
     ) -> torch.Tensor:
-        y = self.ls1(self.attn(self.norm1(x), attn_mask=attn_mask, is_causal=is_causal))
+        assert (
+            not self._is_decoding or is_causal
+        ), "Can only decode with causal attention"
+
+        if self._is_decoding and self._use_cache:
+            assert (
+                self._kv_cache is None or x.shape[1] == 1
+            ), "Can only decode one token at a time with caching"
+
+            y, kv = self.attn(
+                self.norm1(x),
+                attn_mask=attn_mask,
+                is_causal=is_causal and self._kv_cache is None,
+                kv_cache=self._kv_cache,
+                return_kv=True,
+            )
+            self._kv_cache = kv.detach()
+            y = self.ls1(y)
+        else:
+            y = self.attn(self.norm1(x), attn_mask=attn_mask, is_causal=is_causal)
+            y = self.ls1(y)
         x = x + self.drop_path1(y)
 
         if context is not None:
@@ -165,6 +199,13 @@ class Block(nn.Module):
         y = self.ls3(self.mlp(self.norm3(x)))
         x = x + self.drop_path3(y)
         return x
+
+    def decoding(self, mode: bool = True, use_cache: bool = True):
+        if mode:
+            self._use_cache = use_cache
+        else:
+            self._kv_cache = None
+        self._is_decoding = mode
 
 
 class TokenDropout(nn.Dropout1d):
@@ -272,6 +313,9 @@ class Transformer(nn.Module):
 
         self.init_weights()
 
+        self._is_decoding = False
+        self._was_training = False
+
     def init_weights(self):
         if self.is_masked:
             trunc_normal_(self.mask_token, std=0.02)
@@ -308,6 +352,7 @@ class Transformer(nn.Module):
         x: torch.Tensor,
         sub_indices: Optional[torch.Tensor] = None,
         order: Optional[torch.Tensor] = None,
+        offset: Optional[int] = None,
     ) -> torch.Tensor:
         assert (
             order is None or not self.is_causal or self.with_next_pos
@@ -315,12 +360,20 @@ class Transformer(nn.Module):
         assert (
             sub_indices is None or self.with_sub_embed
         ), "Must set with_sub_embed=True to use sub_indices"
+        # position of first token, -1 means start with subject token
+        assert offset is None or -1 <= offset < self.num_patches, "Invalid offset"
         B = x.size(0)
 
         # learned position encoding
         pos_embed = self.pos_embed
         if order is not None:
             pos_embed = pos_embed[order]
+        pos_embed = pos_embed.expand(B, -1, -1)
+        # slice position embedding the start of the x subsequence
+        # only relevant during cached decoding
+        if offset is not None:
+            start = max(offset, 0)
+            pos_embed = pos_embed[:, start : start + x.size(1)]
         x = x + pos_embed
 
         if sub_indices is not None:
@@ -330,7 +383,8 @@ class Transformer(nn.Module):
         else:
             # group token only
             sub_token = self.group_token.expand(B, -1, -1)
-        x = torch.cat([sub_token, x], dim=1)
+        if offset is None or offset < 0:
+            x = torch.cat([sub_token, x], dim=1)
 
         # learned next position query (for shuffled orders)
         if self.with_next_pos:
@@ -340,6 +394,9 @@ class Transformer(nn.Module):
             next_pos_query = next_pos_query.expand(B, -1, -1)
             eos_query = self.eos_query.expand(B, -1, -1)
             next_pos_query = torch.cat([next_pos_query, eos_query], dim=1)
+            if offset is not None:
+                start = offset + 1
+                next_pos_query = next_pos_query[:, start : start + x.size(1)]
             x = x + next_pos_query
 
         # append registers
@@ -368,6 +425,7 @@ class Transformer(nn.Module):
         context: Optional[torch.Tensor] = None,
         order: Optional[torch.Tensor] = None,
         bool_masked_pos: Optional[torch.Tensor] = None,
+        offset: Optional[int] = None,
     ) -> torch.Tensor:
         assert (
             context is None or self.with_cross
@@ -378,7 +436,7 @@ class Transformer(nn.Module):
 
         if bool_masked_pos is not None:
             x = self._mask_pos(x, bool_masked_pos)
-        x = self._pos_embed(x, sub_indices, order)
+        x = self._pos_embed(x, sub_indices, order, offset=offset)
 
         attn_mask = self._get_attn_mask(x)
         is_causal = self.is_causal and attn_mask is None
@@ -401,6 +459,7 @@ class Transformer(nn.Module):
         context: Optional[torch.Tensor] = None,
         order: Optional[torch.Tensor] = None,
         bool_masked_pos: Optional[torch.Tensor] = None,
+        offset: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -409,6 +468,7 @@ class Transformer(nn.Module):
             context: context features (B, M, C)
             order: token order (B, N) or (N,)
             bool_masked_pos: masked token positions (B, N)
+            offset: position of first token, -1 means start with subject token
 
         Returns:
             output tensor (B, N+1, C), where the +1 is due to the prepended subject
@@ -420,6 +480,7 @@ class Transformer(nn.Module):
             context=context,
             order=order,
             bool_masked_pos=bool_masked_pos,
+            offset=offset,
         )
 
         x = self.forward_head(x)
@@ -447,6 +508,17 @@ class Transformer(nn.Module):
             }
         ]
         return keys
+
+    def decoding(self, mode: bool = True, use_cache: bool = True):
+        if mode:
+            self._was_training = self.training
+            self.eval()
+        else:
+            self.train(self._was_training)
+        self._is_decoding = mode
+
+        for block in self.blocks:
+            block.decoding(mode=mode, use_cache=use_cache)
 
     def extra_repr(self) -> str:
         return (

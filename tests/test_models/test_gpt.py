@@ -77,6 +77,44 @@ def test_image2bold(categorical: bool, training: bool):
     )
 
 
+@pytest.mark.parametrize(
+    "prompt_fraction,shuffle",
+    [(0.25, False), (0.25, True), (0.0, True)],
+)
+@pytest.mark.parametrize("categorical", [False])
+def test_boldgpt_generate(categorical: bool, shuffle: bool, prompt_fraction: float):
+    torch.manual_seed(42)
+
+    model: ImageGPT = create_model("boldgpt_tiny_patch10", categorical=categorical)
+
+    batch = {
+        "activity": torch.randn(4, 215, 200),
+        "subject_id": torch.arange(4),
+        "nsd_id": torch.arange(4),
+    }
+
+    logging.info("Generating (no cache)")
+    samples_no_cache, state = model.generate(
+        batch,
+        prompt_fraction=prompt_fraction,
+        shuffle=shuffle,
+        use_cache=False,
+    )
+
+    logging.info("Generating (cache)")
+    order = state["order"]
+    samples, state = model.generate(
+        batch,
+        prompt_fraction=prompt_fraction,
+        order=order,
+        use_cache=True,
+    )
+
+    assert torch.allclose(samples, samples_no_cache, rtol=1e-5, atol=1e-5)
+    logging.info("Samples: %s", samples.shape)
+    logging.info("State:\n%s", {k: get_shape(v) for k, v in state.items()})
+
+
 def get_shape(v):
     if isinstance(v, torch.Tensor):
         return tuple(v.shape)
@@ -84,5 +122,5 @@ def get_shape(v):
 
 
 if __name__ == "__main__":
-    # pytest.main([__file__, "-k", "test_image2bold"])
-    pytest.main([__file__])
+    pytest.main([__file__, "-k", "test_boldgpt_generate"])
+    # pytest.main([__file__])

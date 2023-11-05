@@ -45,21 +45,6 @@ def test_boldbeit(categorical: bool, mask_ratio: Optional[float]):
     )
 
 
-@pytest.mark.parametrize("categorical", [True, False])
-def test_boldbeit_generate(categorical: bool):
-    torch.manual_seed(42)
-    model: BEiT = create_model("boldbeit_tiny_patch10", categorical=categorical)
-    batch = {
-        "activity": torch.randn(1, 215, 200),
-        "subject_id": torch.arange(1),
-        "nsd_id": torch.arange(1),
-    }
-    pred, state = model.generate(batch, shuffle=True)
-
-    logging.info("Pred: %s", pred.shape)
-    logging.info("State:\n%s", {k: get_shape(v) for k, v in state.items()})
-
-
 def get_shape(v):
     if isinstance(v, torch.Tensor):
         return tuple(v.shape)

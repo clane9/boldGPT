@@ -17,71 +17,64 @@ def generate(
     order: Optional[torch.Tensor] = None,
     tokenizer: Optional[KMeansTokenizer] = None,
     patch_mask: Optional[torch.Tensor] = None,
-    offset: int = 0,
     temperature: float = 1.0,
     top_k: Optional[int] = None,
+    use_cache: bool = True,
 ) -> torch.Tensor:
     """
     Auto-regressively generate samples from a model.
-
-    Args:
-        offset: how many leading non-prediction tokens to strip.
     """
-    if not (model.is_causal or model.is_masked):
-        raise ValueError("Can only generate with a causal or masked model")
+    if not model.is_causal:
+        raise ValueError("Can only generate with a causal model")
     is_categorical = tokenizer is not None
     if is_categorical and tokenizer.vocab_size != model.num_classes:
         raise ValueError("Incompatible model.num_classes for discrete sampling")
     if not is_categorical and model.in_features != model.num_classes:
         raise ValueError("Incompatible model.num_classes for continuous sampling")
 
-    B = prompt.size(0)
-    device = prompt.device
-
-    # To sample we always pass a full-length sequence. But we mask the trailing tokens.
-    # This way, we can potentially sample from an MAE as well as a GPT. The extra
-    # compute cost should not be a big deal (?).
-    samples = torch.zeros(B, model.num_patches, model.in_features, device=device)
-    if model.is_masked:
-        bool_mask_pos = torch.ones(
-            B, model.num_patches, dtype=torch.bool, device=device
-        )
-    else:
-        bool_mask_pos = None
+    B, start, D = prompt.shape
+    N = model.num_patches
+    samples = torch.zeros(B, N, D, device=prompt.device, dtype=prompt.dtype)
+    if start > 0:
+        samples[:, :start] = prompt
 
     if patch_mask is not None:
-        assert patch_mask.shape == samples.shape[1:], "Expected patch mask shape (N, D)"
+        assert patch_mask.shape == (N, D), "Expected patch mask shape (N, D)"
         patch_mask = patch_mask.expand_as(samples)
         if order is not None:
             patch_mask = permute(patch_mask, order)
 
-    start = prompt.size(1)
-    if start > 0:
-        samples[:, :start] = prompt
-        if model.is_masked:
-            bool_mask_pos[:, :start] = False
+    model.decoding(use_cache=use_cache)
 
     for idx in range(start, model.num_patches):
-        samples = patch_mask * samples
+        if use_cache:
+            # On first iteration, we pass the full prompt to fill the cache
+            # Then we reuse the cache, passing only a single token for each later step
+            input = samples[:, :idx] if idx == start else samples[:, idx - 1 : idx]
+            offset = -1 if idx == start else idx - 1
+        else:
+            input = samples
+            offset = None
 
-        # TODO: For auto-regressive generation, we should be able to do this much more
-        # efficiently. The forward pass for the leading tokens is always the same as the
-        # previous iteration (assuming no forward pass randomness). So we should be able
-        # to provide just the pre-kv hidden states for each block as context.
         output = model(
-            samples,
+            input,
             sub_indices=sub_indices,
             context=context,
             order=order,
-            bool_masked_pos=bool_mask_pos,
+            offset=offset,
         )
-        # Strip leading subject token if MAE.
-        output = output[:, offset + idx : offset + idx + 1]
+        output = output[:, -1:] if use_cache else output[:, idx : idx + 1]
 
         if is_categorical:
             tokens = sample_tokens(output, temperature=temperature, top_k=top_k)
             output = tokenizer.inverse(tokens)
+
+        if patch_mask is not None:
+            output = output * patch_mask[:, idx : idx + 1]
+
         samples[:, idx : idx + 1] = output
+
+    model.decoding(False)
     return samples
 
 

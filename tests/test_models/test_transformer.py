@@ -3,7 +3,7 @@ import logging
 import pytest
 import torch
 
-from boldgpt.models.transformer import Transformer
+from boldgpt.models.transformer import Attention, Transformer
 
 
 def test_transformer():
@@ -51,5 +51,17 @@ def test_transformer():
     logging.info("Decay keys:\n%s", list(decay_keys))
 
 
+def test_attention_kv_cache():
+    attn = Attention(dim=192, num_heads=3)
+    x = torch.randn(4, 8, 192)
+    with torch.no_grad():
+        y = attn.forward(x, is_causal=True)
+        y1, kv = attn.forward(x[:, :7], is_causal=True, return_kv=True)
+        y2 = attn.forward(x[:, 7:], is_causal=False, kv_cache=kv)
+    y12 = torch.cat([y1, y2], dim=1)
+    assert torch.allclose(y, y12, rtol=1e-5, atol=1e-5)
+
+
 if __name__ == "__main__":
-    pytest.main([__file__])
+    pytest.main([__file__, "-k", "test_attention_kv_cache"])
+    # pytest.main([__file__])

@@ -134,6 +134,7 @@ class ImageGPT(nn.Module):
         context: Optional[torch.Tensor] = None,
         temperature: float = 1.0,
         top_k: Optional[int] = None,
+        use_cache: bool = True,
     ) -> Tuple[torch.Tensor, Dict[str, Optional[torch.Tensor]]]:
         if not self.shuffle and (shuffle or order is not None):
             raise ValueError(
@@ -175,9 +176,9 @@ class ImageGPT(nn.Module):
             order=order,
             tokenizer=self.tokenizer,
             patch_mask=self.patchify.patch_mask,
-            offset=0,
             temperature=temperature,
             top_k=top_k,
+            use_cache=use_cache,
         )
 
         if order is not None:
