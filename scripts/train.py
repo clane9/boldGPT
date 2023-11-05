@@ -13,6 +13,7 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
+import wandb
 import yaml
 from hf_argparser import HfArg, HfArgumentParser
 from matplotlib import pyplot as plt
@@ -23,7 +24,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 
-import wandb
 from boldgpt.data import get_default_collate, load_nsd_flat, load_nsd_flat_mask
 from boldgpt.models import ImageGPT, create_model, list_models
 from boldgpt.models.utils import get_no_decay_keys
@@ -32,11 +32,6 @@ from boldgpt.utils import ClusterInfo, get_exp_name, get_sha, seed_hash, setup_l
 np.set_printoptions(precision=3)
 
 PROJECT = "boldgpt"
-
-LOG_INTERVAL = 10
-NUM_EXAMPLES = 10
-CKPT_INTERVAL = 5
-MAX_CKPTS = 5
 
 
 @dataclass
@@ -99,6 +94,7 @@ class Args:
     checkpoint: Optional[str] = HfArg(
         aliases=["--ckpt"], default=None, help="checkpoint to load"
     )
+    strict_load: bool = HfArg(aliases=["--strict"], default=True, help="strict loading")
     restart: bool = HfArg(
         default=False, help="Restart training rather than resume from checkpoint"
     )
@@ -108,8 +104,23 @@ class Args:
     workers: int = HfArg(aliases=["-j"], default=4, help="data loading workers")
     overwrite: bool = HfArg(default=False, help="overwrite pre-existing results")
     wandb: bool = HfArg(default=False, help="log to wandb")
-    figures: bool = HfArg(default=True, help="generate figures")
     sweep: bool = HfArg(default=False, help="whether we're in a wandb sweep")
+    figures: bool = HfArg(default=True, help="generate figures")
+    num_examples: int = HfArg(
+        aliases=["--numex"], default=10, help="number of examples in figure"
+    )
+    log_interval: int = HfArg(
+        aliases=["--logint"], default=10, help="log every n steps"
+    )
+    figure_interval: int = HfArg(
+        aliases=["--figint"], default=5, help="save figures every n epochs"
+    )
+    checkpoint_interval: int = HfArg(
+        aliases=["--ckptint"], default=20, help="save checkpoint every n epochs"
+    )
+    max_checkpoints: int = HfArg(
+        aliases=["--maxckpt"], default=2, help="number of recent checkpoints to keep"
+    )
     debug: bool = HfArg(default=False, help="quick debug mode")
     seed: int = HfArg(default=42, help="random seed")
 
@@ -303,7 +314,9 @@ def main(args: Args):
             out_dir=out_dir,
         )
 
-        if clust.master_process:
+        if clust.master_process and (
+            epoch % args.checkpoint_interval == 0 or epoch + 1 == args.epochs
+        ):
             save_checkpoint(
                 epoch=epoch,
                 metric=metric,
@@ -390,6 +403,9 @@ def train(
     loss_m = AverageMeter()
     data_time_m = AverageMeter()
     step_time_m = AverageMeter()
+    save_examples = args.figures and (
+        epoch % args.figure_interval == 0 or epoch + 1 == args.epochs
+    )
     examples = None
 
     epoch_batches = len(train_loader)
@@ -455,10 +471,14 @@ def train(
         data_time_m.update(data_time, batch_size)
         step_time_m.update(step_time, batch_size)
 
-        if clust.master_process and batch_idx == 0 and args.figures:
+        if clust.master_process and batch_idx == 0 and save_examples:
             examples = model_unwrap.prepare_examples(batch, state)
 
-        if (step % LOG_INTERVAL == 0 and need_update) or is_last_batch or args.debug:
+        if (
+            (step % args.log_interval == 0 and need_update)
+            or is_last_batch
+            or args.debug
+        ):
             tput = (clust.world_size * args.batch_size) / step_time_m.avg
             if clust.use_cuda:
                 alloc_mem_gb = torch.cuda.max_memory_allocated() / 1e9
@@ -499,11 +519,11 @@ def train(
         if args.debug:
             break
 
-    if clust.master_process and args.figures:
+    if clust.master_process and save_examples:
         example_path = out_dir / "figures" / f"train_examples-{epoch:04d}.png"
         example_path.parent.mkdir(exist_ok=True)
         model_unwrap.plot_examples(
-            examples, num_examples=NUM_EXAMPLES, fname=example_path
+            examples, num_examples=args.num_examples, fname=example_path
         )
 
         if args.wandb:
@@ -532,6 +552,9 @@ def validate(
     loss_m = AverageMeter()
     data_time_m = AverageMeter()
     step_time_m = AverageMeter()
+    save_examples = args.figures and (
+        epoch % args.figure_interval == 0 or epoch + 1 == args.epochs
+    )
     examples = None
 
     epoch_batches = len(val_loader)
@@ -558,11 +581,11 @@ def validate(
         data_time_m.update(data_time, batch_size)
         step_time_m.update(step_time, batch_size)
 
-        if clust.master_process and batch_idx == 0 and args.figures:
+        if clust.master_process and batch_idx == 0 and save_examples:
             examples = model_unwrap.prepare_examples(batch, state)
 
         if (
-            batch_idx % LOG_INTERVAL == 0
+            batch_idx % args.log_interval == 0
             or batch_idx + 1 == epoch_batches
             or args.debug
         ):
@@ -602,10 +625,10 @@ def validate(
         if args.wandb:
             wandb.log({"val": record}, step=step)
 
-    if clust.master_process and args.figures:
+    if clust.master_process and save_examples:
         example_path = out_dir / "figures" / f"val_examples-{epoch:04d}.png"
         model_unwrap.plot_examples(
-            examples, num_examples=NUM_EXAMPLES, fname=example_path
+            examples, num_examples=args.num_examples, fname=example_path
         )
 
         if args.wandb:
@@ -634,7 +657,7 @@ def load_checkpoint(
     model_state = {
         k.removeprefix("_orig_mod.module."): v for k, v in state["model"].items()
     }
-    model.load_state_dict(model_state)
+    model.load_state_dict(model_state, strict=args.strict_load)
 
     if not args.restart:
         optimizer.load_state_dict(state["optimizer"])
@@ -669,7 +692,7 @@ def save_checkpoint(
     torch.save(state, ckpt_path)
 
     all_ckpts = sorted(ckpt_dir.glob("ckpt-[0-9]*.pt"))
-    for p in all_ckpts[:-MAX_CKPTS]:
+    for p in all_ckpts[: -args.max_checkpoints]:
         p.unlink()
 
     ckpt_last = ckpt_dir / "ckpt-last.pt"

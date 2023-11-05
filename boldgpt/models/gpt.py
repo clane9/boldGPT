@@ -217,7 +217,11 @@ class ImageGPT(nn.Module):
         ranking = state["ranking"]
         tokens = state["tokens"]
         context = state["context"]
-        output = state["output"].detach()
+        output = state["output"]
+
+        if context is not None:
+            context = context.detach()
+        output = output.detach()
 
         B, N = patches.shape[:2]
         device = patches.device
@@ -250,8 +254,6 @@ class ImageGPT(nn.Module):
         target_r2 = r2_score(target[:, mask], images[:, mask], reduction="none")
         recon_r2 = r2_score(recon[:, mask], images[:, mask], reduction="none")
 
-        # TODO: Actually doing generation as currently implemented will be too expensive
-        # to do for each epoch.
         sample, _ = self.generate(
             batch=batch,
             prompt_fraction=0.0 if self.is_seq2seq else 0.25,
