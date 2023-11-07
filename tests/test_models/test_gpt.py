@@ -5,7 +5,7 @@ import matplotlib as mpl
 import pytest
 import torch
 
-from boldgpt.models import ImageGPT, create_model
+from boldgpt.models import IGPT, create_model
 from boldgpt.models.utils import get_no_decay_keys
 
 mpl.use("Agg")
@@ -19,7 +19,7 @@ RESULT_DIR.mkdir(exist_ok=True)
 def test_boldgpt(categorical: bool, training: bool):
     torch.manual_seed(42)
 
-    model: ImageGPT = create_model("boldgpt_tiny_patch10", categorical=categorical)
+    model: IGPT = create_model("boldgpt_tiny_patch10", categorical=categorical)
     logging.info("Model:\n%s", model)
 
     no_decay_keys = get_no_decay_keys(model)
@@ -51,7 +51,7 @@ def test_boldgpt(categorical: bool, training: bool):
 def test_image2bold(categorical: bool, training: bool):
     torch.manual_seed(42)
 
-    model: ImageGPT = create_model("image2bold_tiny_patch10", categorical=categorical)
+    model: IGPT = create_model("image2bold_tiny_patch10", categorical=categorical)
     logging.info("Model:\n%s", model)
 
     batch = {
@@ -85,7 +85,7 @@ def test_image2bold(categorical: bool, training: bool):
 def test_boldgpt_generate(categorical: bool, shuffle: bool, prompt_fraction: float):
     torch.manual_seed(42)
 
-    model: ImageGPT = create_model("boldgpt_tiny_patch10", categorical=categorical)
+    model: IGPT = create_model("boldgpt_tiny_patch10", categorical=categorical)
 
     batch = {
         "activity": torch.randn(4, 215, 200),

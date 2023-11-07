@@ -10,7 +10,7 @@ Humans struggle to "see" the structure in functional MRI (BOLD) brain maps. Our 
 
 **Models.** All our models use a vanilla ViT architecture ([`Transformer`](boldgpt/models/transformer.py)) adapted from [timm](https://github.com/huggingface/pytorch-image-models/blob/main/timm/models/vision_transformer.py). We consider a few different pre-training objectives:
 
-- Auto-regressive next patch prediction with shuffled patch order ([`ImageGPT`](boldgpt/models/gpt.py)). With either:
+- Auto-regressive next patch prediction with shuffled patch order ([`IGPT`](boldgpt/models/gpt.py)). With either:
 
   - Discrete k-means token targets ([`KMeansTokenizer`](boldgpt/tokenizer.py)) and cross-entropy loss
   - Continuous patch targets and MSE loss

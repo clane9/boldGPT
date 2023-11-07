@@ -1,5 +1,6 @@
 import logging
-from typing import Any, Dict, Literal, Optional, Tuple, Union
+import re
+from typing import Any, Dict, Literal, Optional, Tuple
 
 import numpy as np
 import timm
@@ -27,7 +28,7 @@ CMAP = colormaps.get_cmap("turbo")
 CMAP.set_bad("gray")
 
 
-class ImageGPT(nn.Module):
+class IGPT(nn.Module):
     def __init__(
         self,
         patchify: MaskedPatchify,
@@ -163,6 +164,9 @@ class ImageGPT(nn.Module):
         prompt_length = int(prompt_fraction * N)
         prompt = patches[:, :prompt_length]
 
+        sample_mask = torch.ones(B, N, device=prompt.device, dtype=torch.bool)
+        sample_mask[:, :prompt_length] = False
+
         # Get encoder context
         if self.is_seq2seq and context is None:
             _, features = self.extractor(inputs)
@@ -182,7 +186,9 @@ class ImageGPT(nn.Module):
         )
 
         if order is not None:
+            sample_mask = permute(sample_mask, ranking)
             sample = permute(sample, ranking)
+        sample_mask = self.patchify.inverse_vector(sample_mask)
         sample = self.patchify.inverse(sample)
 
         state = {
@@ -192,6 +198,7 @@ class ImageGPT(nn.Module):
             "prompt_length": prompt_length,
             "context": context,
             "sample": sample,
+            "sample_mask": sample_mask,
         }
         return sample, state
 
@@ -254,13 +261,17 @@ class ImageGPT(nn.Module):
         target_r2 = r2_score(target[:, mask], images[:, mask], reduction="none")
         recon_r2 = r2_score(recon[:, mask], images[:, mask], reduction="none")
 
-        sample, _ = self.generate(
+        sample, sample_state = self.generate(
             batch=batch,
             prompt_fraction=0.0 if self.is_seq2seq else 0.25,
             order=order,
             context=context,
         )
-        sample_r2 = r2_score(sample[:, mask], images[:, mask], reduction="none")
+        sample_mask = sample_state["sample_mask"]
+        sample = sample_mask * sample
+        sample_r2 = r2_score(
+            sample[:, mask], (sample_mask * images)[:, mask], reduction="none"
+        )
 
         examples = {
             "subject_id": subind,
@@ -271,6 +282,7 @@ class ImageGPT(nn.Module):
             "target": target,
             "recon": recon,
             "sample": sample,
+            "sample_mask": sample_mask,
             "target_r2": target_r2,
             "recon_r2": recon_r2,
             "sample_r2": sample_r2,
@@ -455,24 +467,17 @@ def _imshow(img: np.ndarray, img_shape: Optional[Tuple[int, int]] = None, **kwar
     plt.axis("off")
 
 
-def _create_image_gpt(
+def _create_boldgpt(
     *,
-    modality: str = "bold",
     mask: Optional[np.ndarray] = None,
-    img_size: int = 224,
     patch_size: int = 10,
-    ordering: Optional[str] = None,
-    categorical: bool = True,
-    with_sub_embed: Optional[bool] = None,
+    categorical: bool = False,
+    ordering: str = "radial",
+    with_sub_embed: bool = True,
     vocab_size: int = 1024,
     shuffle: bool = True,
-    encoder: Optional[Union[str, nn.Module]] = None,
-    encoder_kwargs: Optional[Dict[str, Any]] = None,
-    layer: Optional[str] = None,
     num_subs: int = 1024,
-    num_registers: int = 0,
     embed_dim: int = 768,
-    context_dim: int = 768,
     depth: int = 12,
     num_heads: int = 12,
     mlp_ratio: float = 4.0,
@@ -486,43 +491,26 @@ def _create_image_gpt(
     if kwargs:
         logging.warning("Extra unused kwargs: %s", kwargs)
 
-    is_bold = modality == "bold"
     if mask is None:
-        if is_bold:
-            mask = load_nsd_flat_mask()
-        else:
-            mask = torch.ones(img_size, img_size, dtype=torch.bool)
-    if ordering is None:
-        ordering = "radial" if is_bold else "reverse_radial"
-    if with_sub_embed is None:
-        with_sub_embed = is_bold
-
+        mask = load_nsd_flat_mask()
     patchify = MaskedPatchify(mask, patch_size=patch_size, ordering=ordering)
-
     if categorical:
         tokenizer = KMeansTokenizer(vocab_size=vocab_size, dim=patchify.dim)
     else:
         tokenizer = None
 
-    if isinstance(encoder, str):
-        encoder_kwargs = encoder_kwargs or {}
-        encoder_kwargs = {"pretrained": True, **encoder_kwargs}
-        encoder = timm.create_model(encoder, **encoder_kwargs)
-
     decoder = Transformer(
         num_patches=patchify.num_patches,
         in_features=patchify.dim,
         num_subs=num_subs,
-        num_registers=num_registers,
         num_classes=(vocab_size if categorical else patchify.dim),
         embed_dim=embed_dim,
-        context_dim=context_dim,
         depth=depth,
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
         with_sub_embed=with_sub_embed,
         with_next_pos=shuffle,
-        with_cross=encoder is not None,
+        with_cross=False,
         is_causal=True,
         is_masked=False,
         drop_rate=drop_rate,
@@ -532,98 +520,206 @@ def _create_image_gpt(
         drop_path_rate=drop_path_rate,
     )
 
-    model = ImageGPT(
+    model = IGPT(
         patchify=patchify,
         tokenizer=tokenizer,
         decoder=decoder,
-        encoder=encoder,
-        layer=layer,
         shuffle=shuffle,
-        modality=modality,
+        modality="bold",
     )
     return model
 
 
+def _create_imagegpt(
+    *,
+    img_size: int = 224,
+    patch_size: int = 10,
+    ordering: str = "reverse_radial",
+    categorical: bool = False,
+    vocab_size: int = 1024,
+    shuffle: bool = True,
+    embed_dim: int = 768,
+    depth: int = 12,
+    num_heads: int = 12,
+    mlp_ratio: float = 4.0,
+    drop_rate: float = 0.0,
+    proj_drop_rate: float = 0.0,
+    attn_drop_rate: float = 0.0,
+    drop_path_rate: float = 0.0,
+    **kwargs,
+):
+    if kwargs:
+        logging.warning("Extra unused kwargs: %s", kwargs)
+
+    mask = torch.ones(img_size, img_size, dtype=torch.bool)
+    patchify = MaskedPatchify(mask, patch_size=patch_size, ordering=ordering)
+    if categorical:
+        tokenizer = KMeansTokenizer(vocab_size=vocab_size, dim=patchify.dim)
+    else:
+        tokenizer = None
+
+    decoder = Transformer(
+        num_patches=patchify.num_patches,
+        in_features=patchify.dim,
+        num_classes=(vocab_size if categorical else patchify.dim),
+        embed_dim=embed_dim,
+        depth=depth,
+        num_heads=num_heads,
+        mlp_ratio=mlp_ratio,
+        with_sub_embed=False,
+        with_next_pos=shuffle,
+        with_cross=False,
+        is_causal=True,
+        is_masked=False,
+        drop_rate=drop_rate,
+        proj_drop_rate=proj_drop_rate,
+        attn_drop_rate=attn_drop_rate,
+        drop_path_rate=drop_path_rate,
+    )
+
+    model = IGPT(
+        patchify=patchify,
+        tokenizer=tokenizer,
+        decoder=decoder,
+        shuffle=shuffle,
+        modality="image",
+    )
+    return model
+
+
+def _create_image2bold(
+    *,
+    mask: Optional[np.ndarray] = None,
+    patch_size: int = 10,
+    ordering: str = "radial",
+    categorical: bool = False,
+    with_sub_embed: bool = True,
+    vocab_size: int = 1024,
+    shuffle: bool = True,
+    encoder_name: str = "eva02_base_patch14_224.mim_in22k",
+    encoder_kwargs: Optional[Dict[str, Any]] = None,
+    encoder_layer: Optional[str] = "blocks.8",
+    num_subs: int = 1024,
+    embed_dim: int = 768,
+    depth: int = 12,
+    num_heads: int = 12,
+    mlp_ratio: float = 4.0,
+    drop_rate: float = 0.0,
+    sub_drop_rate: float = 0.0,
+    proj_drop_rate: float = 0.0,
+    attn_drop_rate: float = 0.0,
+    drop_path_rate: float = 0.0,
+    **kwargs,
+):
+    if kwargs:
+        logging.warning("Extra unused kwargs: %s", kwargs)
+
+    if mask is None:
+        mask = load_nsd_flat_mask()
+    patchify = MaskedPatchify(mask, patch_size=patch_size, ordering=ordering)
+    if categorical:
+        tokenizer = KMeansTokenizer(vocab_size=vocab_size, dim=patchify.dim)
+    else:
+        tokenizer = None
+
+    encoder_kwargs = encoder_kwargs or {}
+    encoder_kwargs = {"pretrained": True, **encoder_kwargs}
+    encoder = timm.create_model(encoder_name, **encoder_kwargs)
+    encoder_dim = _infer_embed_dim(encoder_name)
+
+    decoder = Transformer(
+        num_patches=patchify.num_patches,
+        in_features=patchify.dim,
+        num_subs=num_subs,
+        num_classes=(vocab_size if categorical else patchify.dim),
+        embed_dim=embed_dim,
+        context_dim=encoder_dim,
+        depth=depth,
+        num_heads=num_heads,
+        mlp_ratio=mlp_ratio,
+        with_sub_embed=with_sub_embed,
+        with_next_pos=shuffle,
+        with_cross=True,
+        is_causal=True,
+        is_masked=False,
+        drop_rate=drop_rate,
+        sub_drop_rate=sub_drop_rate,
+        proj_drop_rate=proj_drop_rate,
+        attn_drop_rate=attn_drop_rate,
+        drop_path_rate=drop_path_rate,
+    )
+
+    model = IGPT(
+        patchify=patchify,
+        tokenizer=tokenizer,
+        decoder=decoder,
+        encoder=encoder,
+        layer=encoder_layer,
+        shuffle=shuffle,
+        modality="bold",
+    )
+    return model
+
+
+def _infer_embed_dim(arch: str) -> int:
+    dims = {
+        "tiny": 192,
+        "small": 384,
+        "base": 768,
+        "large": 1024,
+    }
+
+    pattern = f"_({'|'.join(dims)})_"
+    match = re.search(pattern, arch)
+    if match is None:
+        raise ValueError(f"Arch {arch} doesn't match any expected dims: {list(dims)}")
+    dim = dims[match.group(1)]
+    return dim
+
+
 @register_model
 def boldgpt_tiny_patch10(**kwargs):
-    return _create_image_gpt(
-        modality="bold", patch_size=10, **C.TINY_ARCH_KWARGS, **kwargs
-    )
+    return _create_boldgpt(patch_size=10, **C.TINY_ARCH_KWARGS, **kwargs)
 
 
 @register_model
 def boldgpt_small_patch10(**kwargs):
-    return _create_image_gpt(
-        modality="bold", patch_size=10, **C.SMALL_ARCH_KWARGS, **kwargs
-    )
+    return _create_boldgpt(patch_size=10, **C.SMALL_ARCH_KWARGS, **kwargs)
 
 
 @register_model
 def boldgpt_base_patch10(**kwargs):
-    return _create_image_gpt(
-        modality="bold", patch_size=10, **C.BASE_ARCH_KWARGS, **kwargs
-    )
+    return _create_boldgpt(patch_size=10, **C.BASE_ARCH_KWARGS, **kwargs)
 
 
 @register_model
 def imagegpt_tiny_patch16(**kwargs):
-    return _create_image_gpt(
-        modality="image", patch_size=16, **C.TINY_ARCH_KWARGS, **kwargs
-    )
+    return _create_imagegpt(patch_size=16, **C.TINY_ARCH_KWARGS, **kwargs)
 
 
 @register_model
 def imagegpt_small_patch16(**kwargs):
-    return _create_image_gpt(
-        modality="image", patch_size=16, **C.SMALL_ARCH_KWARGS, **kwargs
-    )
+    return _create_imagegpt(patch_size=16, **C.SMALL_ARCH_KWARGS, **kwargs)
 
 
 @register_model
 def imagegpt_base_patch16(**kwargs):
-    return _create_image_gpt(
-        modality="image", patch_size=16, **C.BASE_ARCH_KWARGS, **kwargs
-    )
-
-
-_EVA02_ENCODER_KWARGS = {
-    "encoder": "eva02_base_patch14_224.mim_in22k",
-    "layer": "blocks.8",
-    "context_dim": 768,
-}
+    return _create_imagegpt(patch_size=16, **C.BASE_ARCH_KWARGS, **kwargs)
 
 
 @register_model
 def image2bold_tiny_patch10(**kwargs):
-    return _create_image_gpt(
-        modality="bold",
-        patch_size=10,
-        **_EVA02_ENCODER_KWARGS,
-        **C.TINY_ARCH_KWARGS,
-        **kwargs,
-    )
+    return _create_image2bold(patch_size=10, **C.TINY_ARCH_KWARGS, **kwargs)
 
 
 @register_model
 def image2bold_small_patch10(**kwargs):
-    return _create_image_gpt(
-        modality="bold",
-        patch_size=10,
-        **_EVA02_ENCODER_KWARGS,
-        **C.SMALL_ARCH_KWARGS,
-        **kwargs,
-    )
+    return _create_image2bold(patch_size=10, **C.SMALL_ARCH_KWARGS, **kwargs)
 
 
 @register_model
 def image2bold_base_patch10(**kwargs):
-    return _create_image_gpt(
-        modality="bold",
-        patch_size=10,
-        **_EVA02_ENCODER_KWARGS,
-        **C.BASE_ARCH_KWARGS,
-        **kwargs,
-    )
+    return _create_image2bold(patch_size=10, **C.BASE_ARCH_KWARGS, **kwargs)
 
 
 CONFIGS = {
