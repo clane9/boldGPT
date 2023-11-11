@@ -22,8 +22,6 @@ class MaskedPatchify(nn.Module):
     Or you can pass a custom priority tensor, shape (H, W), to determine the order.
     """
 
-    # TODO: could add support for a custom ordering provided via a "priority" map
-
     mask: torch.Tensor
     patch_mask: torch.Tensor
     patch_indices: torch.Tensor
@@ -121,9 +119,18 @@ class MaskedPatchify(nn.Module):
     @property
     def interior_mask(self) -> torch.Tensor:
         """
-        Mask of patches contained in the mask interior.
+        Mask of patches contained in the mask interior, shape (num_patches,).
         """
         return torch.all(self.patch_mask, dim=-1)
+
+    @property
+    def expanded_mask(self) -> torch.Tensor:
+        """
+        Mask expanded for the number of channels, shape ([C, ]H, W).
+        """
+        if self.num_channels > 1:
+            return self.mask.expand(self.num_channels, -1, -1)
+        return self.mask
 
     def forward_raw(self, images: torch.Tensor) -> torch.Tensor:
         if self.num_channels == 1 and images.ndim == 3:
@@ -143,12 +150,9 @@ class MaskedPatchify(nn.Module):
             patches = patches * self.patch_mask
         return patches
 
-    def inverse(
-        self, patches: torch.Tensor, apply_mask: bool = True, squeeze: bool = True
-    ) -> torch.Tensor:
+    def inverse(self, patches: torch.Tensor, apply_mask: bool = True) -> torch.Tensor:
         """
-        Convert patches, shape (B, N, D), back to images, shape (B, C, H, W). If squeeze
-        is True and C is 1, the channels dimension is squeezed.
+        Convert patches, shape (B, N, D), back to images, shape (B, [C, ]H, W).
         """
         assert patches.ndim == 3, "Invalid patches shape; expected (B, N, D)"
         assert patches.shape[1] == self.num_patches, "Invalid patches shape"
@@ -169,7 +173,7 @@ class MaskedPatchify(nn.Module):
 
         if apply_mask:
             images = images * self.mask
-        if squeeze and self.num_channels == 1:
+        if self.num_channels == 1:
             images = images.squeeze(1)
         return images
 
@@ -177,7 +181,7 @@ class MaskedPatchify(nn.Module):
         self, values: torch.Tensor, apply_mask: bool = True
     ) -> torch.Tensor:
         """
-        Reconstruct a patch map from a vector of patch values.
+        Reconstruct a patch map, shape (B, [C, ]H, W), from a vector of patch values.
         """
         assert values.ndim == 2, "Invalid values shape"
         patches = values[..., None].expand(-1, -1, self.dim)

@@ -48,6 +48,37 @@ def test_boldgpt(categorical: bool, training: bool):
 
 @pytest.mark.parametrize("training", [True, False])
 @pytest.mark.parametrize("categorical", [True, False])
+def test_imagegpt(categorical: bool, training: bool):
+    torch.manual_seed(42)
+
+    model: IGPT = create_model("imagegpt_tiny_patch16", categorical=categorical)
+    logging.info("Model:\n%s", model)
+
+    no_decay_keys = get_no_decay_keys(model)
+    logging.info("No decay keys[:10]:\n%s", no_decay_keys[:10])
+
+    batch = {
+        "image": torch.randn(4, 3, 224, 224),
+        "image_id": torch.arange(4),
+    }
+
+    model.train(training)
+    output, state = model.forward(batch)
+    loss = model.loss_fn(batch, output, state)
+
+    logging.info("Loss: %.3e", loss.item())
+    logging.info("State:\n%s", {k: get_shape(v) for k, v in state.items()})
+
+    examples = model.prepare_examples(batch, state)
+    model.plot_examples(
+        examples,
+        num_examples=3,
+        fname=RESULT_DIR / f"examples_imagegpt_cat-{categorical}_train-{training}.png",
+    )
+
+
+@pytest.mark.parametrize("training", [True, False])
+@pytest.mark.parametrize("categorical", [True, False])
 def test_image2bold(categorical: bool, training: bool):
     torch.manual_seed(42)
 
@@ -122,5 +153,6 @@ def get_shape(v):
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-k", "test_boldgpt_generate"])
+    pytest.main([__file__, "-k", "test_boldgpt"])
+    # pytest.main([__file__, "-k", "test_boldgpt_generate"])
     # pytest.main([__file__])

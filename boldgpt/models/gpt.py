@@ -9,9 +9,10 @@ import torch.nn.functional as F
 from matplotlib import colormaps
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
+from timm.data import resolve_model_data_config, str_to_interp_mode
 from torch import nn
 
-from boldgpt.data import load_nsd_flat_mask
+from boldgpt.data import DataConfig, load_nsd_flat_mask
 from boldgpt.features import FeatureExtractor
 from boldgpt.patching import MaskedPatchify
 from boldgpt.shuffle import permute, random_order
@@ -211,8 +212,13 @@ class IGPT(nn.Module):
         """
         Prepare a batch of examples for figure generation.
         """
-        subind = batch["subject_id"]
-        nsdind = batch["nsd_id"]
+        subid = batch["subject_id"] if "subject_id" in batch else None
+        if "nsd_id" in batch:
+            imgid = batch["nsd_id"]
+        elif "image_id" in batch:
+            imgid = batch["image_id"]
+        else:
+            imgid = None
         images = batch["activity"] if self.modality == "bold" else batch["image"]
         if self.is_seq2seq:
             inputs = batch["image"] if self.modality == "bold" else batch["activity"]
@@ -234,7 +240,7 @@ class IGPT(nn.Module):
         device = patches.device
 
         # Ensure images are masked
-        mask = self.patchify.mask
+        mask = self.patchify.expanded_mask
         images = mask * images
 
         # Unshuffle if necessary
@@ -248,6 +254,9 @@ class IGPT(nn.Module):
 
         # Invert order, target, reconstruction and compute R^2
         order_map = self.patchify.inverse_vector(ranking.float() + 1.0)
+        # Remove channels dimension
+        if self.modality == "image":
+            order_map = order_map[:, 0]
         if self.is_categorical:
             target = self.tokenizer.inverse(tokens)
             pred = torch.argmax(output, dim=-1)
@@ -257,7 +266,6 @@ class IGPT(nn.Module):
             recon = output
         target = self.patchify.inverse(target)
         recon = self.patchify.inverse(recon)
-        # TODO: This won't work if images have a channels dim since mask is 2D
         target_r2 = r2_score(target[:, mask], images[:, mask], reduction="none")
         recon_r2 = r2_score(recon[:, mask], images[:, mask], reduction="none")
 
@@ -268,14 +276,15 @@ class IGPT(nn.Module):
             context=context,
         )
         sample_mask = sample_state["sample_mask"]
-        sample = sample_mask * sample
         sample_r2 = r2_score(
-            sample[:, mask], (sample_mask * images)[:, mask], reduction="none"
+            (sample_mask * sample)[:, mask],
+            (sample_mask * images)[:, mask],
+            reduction="none",
         )
 
         examples = {
-            "subject_id": subind,
-            "nsd_id": nsdind,
+            "subject_id": subid,
+            "image_id": imgid,
             "images": images,
             "inputs": inputs,
             "order_map": order_map,
@@ -299,17 +308,28 @@ class IGPT(nn.Module):
         """
         Plot a grid of samples and predictions.
         """
-        subind = examples["subject_id"]
-        nsdind = examples["nsd_id"]
+        subid = examples["subject_id"]
+        imgid = examples["image_id"]
         images = examples["images"]
         inputs = examples["inputs"]
         order_map = examples["order_map"]
         target = examples["target"]
         recon = examples["recon"]
         sample = examples["sample"]
+        sample_mask = examples["sample_mask"]
         target_r2 = examples["target_r2"]
         recon_r2 = examples["recon_r2"]
         sample_r2 = examples["sample_r2"]
+
+        # Remove channels dimension
+        if self.modality == "image":
+            sample_mask = sample_mask[:, 0]
+        sample_mask_rgba = np.where(
+            sample_mask[:, None],
+            np.zeros((1, 4, 1, 1)),
+            np.array([1.0, 1.0, 1.0, 0.4]).reshape(1, 4, 1, 1),
+        )
+        sample_mask_rgba = self.patchify.mask * sample_mask_rgba
 
         img_shape = images.shape[-2:]
         plotw = 3.0
@@ -331,7 +351,12 @@ class IGPT(nn.Module):
         }
 
         for ii in range(num_examples):
-            label = f"sub{subind[ii]+1:02d} nsd{nsdind[ii]:05d}"
+            label = []
+            if subid is not None:
+                label.append(f"s{subid[ii]+1:02d}")
+            if imgid is not None:
+                label.append(f"{imgid[ii]:05d}")
+            label = " ".join(label)
             col = 0
 
             if self.is_seq2seq:
@@ -360,6 +385,9 @@ class IGPT(nn.Module):
                 va="top",
                 transform=tform,
                 **textdict,
+            )
+            plt.text(
+                0.04, 0.0, label, ha="left", va="bottom", transform=tform, **textdict
             )
             col += 1
 
@@ -407,6 +435,7 @@ class IGPT(nn.Module):
             plt.sca(axs[ii, col])
             tform = axs[ii, col].transAxes
             _imshow(sample[ii])
+            _imshow(sample_mask_rgba[ii])
             plt.text(
                 0.5, 0.98, "Sample", ha="center", va="top", transform=tform, **textdict
             )
@@ -427,9 +456,6 @@ class IGPT(nn.Module):
             plt.text(
                 0.5, 0.98, "Order", ha="center", va="top", transform=tform, **textdict
             )
-            plt.text(
-                0.04, 0.0, label, ha="left", va="bottom", transform=tform, **textdict
-            )
             col += 1
 
         plt.tight_layout(pad=0.2, h_pad=0.05)
@@ -437,6 +463,33 @@ class IGPT(nn.Module):
         if fname is not None:
             plt.savefig(fname, bbox_inches="tight")
         return f
+
+    def get_data_config(self) -> DataConfig:
+        cfg = {}
+        if self.modality == "bold" and not self.is_seq2seq:
+            # boldgpt
+            cfg["dataset"] = "NSD-Flat"
+            cfg["columns"] = ["subject_id", "nsd_id", "activity"]
+        elif self.modality == "bold" and self.is_seq2seq:
+            # image2bold
+            cfg["dataset"] = "NSD-Flat"
+            cfg["columns"] = ["subject_id", "nsd_id", "image", "activity"]
+            timm_data_config = resolve_model_data_config(self.encoder)
+            cfg["img_size"] = timm_data_config["input_size"][1]
+            cfg["img_mean"] = timm_data_config["mean"]
+            cfg["img_std"] = timm_data_config["std"]
+            cfg["interp_mode"] = str_to_interp_mode(timm_data_config["interpolation"])
+        elif self.modality == "image" and not self.is_seq2seq:
+            # imagegpt
+            cfg["dataset"] = "COCO"
+            cfg["columns"] = ["image_id", "image"]
+            cfg["img_size"] = self.patchify.mask.shape[1]
+        elif self.modality == "image" and self.is_seq2seq:
+            # bold2image
+            cfg["dataset"] = "NSD-Flat"
+            cfg["columns"] = ["subject_id", "nsd_id", "image", "activity"]
+            cfg["img_size"] = self.patchify.mask.shape[1]
+        return DataConfig(**cfg)
 
     def extra_repr(self) -> str:
         return (
@@ -552,7 +605,9 @@ def _create_imagegpt(
         logging.warning("Extra unused kwargs: %s", kwargs)
 
     mask = torch.ones(img_size, img_size, dtype=torch.bool)
-    patchify = MaskedPatchify(mask, patch_size=patch_size, ordering=ordering)
+    patchify = MaskedPatchify(
+        mask, num_channels=3, patch_size=patch_size, ordering=ordering
+    )
     if categorical:
         tokenizer = KMeansTokenizer(vocab_size=vocab_size, dim=patchify.dim)
     else:

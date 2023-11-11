@@ -21,11 +21,10 @@ from timm.utils import AverageMeter, random_seed, reduce_tensor
 from torch.cuda.amp import GradScaler
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, RandomSampler
-from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import DataLoader
 
-from boldgpt.data import get_default_collate, load_nsd_flat, load_nsd_flat_mask
-from boldgpt.models import ImageGPT, create_model, list_models
+from boldgpt.data import create_data_loaders
+from boldgpt.models import IGPT, create_model, list_models
 from boldgpt.models.utils import get_no_decay_keys
 from boldgpt.utils import ClusterInfo, get_exp_name, get_sha, seed_hash, setup_logging
 
@@ -56,6 +55,9 @@ class Args:
         aliases=["--sub"], default=True, help="learn subject-specific embedding"
     )
     # Regularization and augmentation
+    crop_scale: float = HfArg(
+        aliases=["--crop"], default=1.0, help="image random crop scale"
+    )
     drop_rate: float = HfArg(aliases=["--dr"], default=0.0, help="head dropout rate")
     sub_drop_rate: float = HfArg(
         aliases=["--sdr"], default=0.0, help="subject ID dropout rate"
@@ -194,45 +196,10 @@ def main(args: Args):
         autocast = suppress
         scaler = None
 
-    # Datasets and loaders
-    logging.info("Loading NSD-Flat dataset")
-    dsets = load_nsd_flat(
-        keep_in_memory=(clust.device.type == "cuda" and not args.debug)
-    )
-    for split, ds in dsets.items():
-        logging.info("%s samples: %d", split.capitalize(), len(ds))
-    mask = load_nsd_flat_mask()
-    logging.info("Activity shape: %s", mask.shape)
-    logging.info(
-        "Mask size: %d/%d (%.3f)", mask.sum(), mask.numel(), mask.float().mean()
-    )
-
-    loaders = {}
-    collate = get_default_collate()
-    if clust.ddp:
-        samplers = {
-            "train": DistributedSampler(dsets["train"], shuffle=True),
-            "val": DistributedSampler(dsets["val"], shuffle=False),
-        }
-    else:
-        samplers = {"train": RandomSampler(dsets["train"]), "val": None}
-
-    for split, ds in dsets.items():
-        loaders[split] = DataLoader(
-            ds,
-            batch_size=args.batch_size,
-            sampler=samplers[split],
-            num_workers=args.workers,
-            pin_memory=clust.use_cuda,
-            collate_fn=collate,
-            drop_last=True,  # helpful for torch.compile
-        )
-
     # Model
     logging.info("Creating model: %s", args.model)
     model = create_model(
         args.model,
-        mask=mask,
         categorical=args.categorical,
         vocab_size=args.vocab_size,
         shuffle=args.shuffle,
@@ -243,7 +210,7 @@ def main(args: Args):
         attn_drop_rate=args.attn_drop_rate,
         drop_path_rate=args.drop_path_rate,
     )
-    model: ImageGPT = model.to(clust.device)
+    model: IGPT = model.to(clust.device)
     logging.info("%s", model)
     logging.info("Params: %.0fM", sum(p.numel() for p in model.parameters()) / 1e6)
 
@@ -256,6 +223,22 @@ def main(args: Args):
         logging.info("Loading tokenizer vocab state: %s", args.vocab_state)
         state_dict = torch.load(args.vocab_state, map_location=clust.device)
         model.tokenizer.load_state_dict({"vocab": state_dict["vocab"]})
+
+    # Datasets and loaders
+    data_config = model.get_data_config()
+    logging.info("Loading dataset:\n%s", data_config)
+    loaders = create_data_loaders(
+        data_config,
+        keep_in_memory=clust.device.type == "cuda" and not args.debug,
+        crop_scale=args.crop_scale,
+        distributed=clust.ddp,
+        batch_size=args.batch_size,
+        num_workers=args.workers,
+        pin_memory=clust.use_cuda,
+        drop_last=True,  # helpful for torch.compile
+    )
+    for split, loader in loaders.items():
+        logging.info("%s samples: %d", split.capitalize(), len(loader.dataset))
 
     # Optimizer
     logging.info("Creating optimizer")
@@ -288,7 +271,7 @@ def main(args: Args):
     for epoch in range(start_epoch, args.epochs):
         logging.info("Starting epoch %d", epoch)
         if clust.ddp:
-            samplers["train"].set_epoch(epoch)
+            loaders["train"].sampler.set_epoch(epoch)
 
         train(
             args=args,
@@ -347,7 +330,7 @@ def main(args: Args):
 
 
 def create_optimizer(
-    args: Args, model: ImageGPT
+    args: Args, model: IGPT
 ) -> Tuple[torch.optim.Optimizer, List[str]]:
     decay_params = []
     no_decay_params = []
@@ -375,8 +358,8 @@ def create_optimizer(
 def train(
     args: Args,
     epoch: int,
-    model: Union[DDP, ImageGPT],
-    model_unwrap: ImageGPT,
+    model: Union[DDP, IGPT],
+    model_unwrap: IGPT,
     train_loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     clust: ClusterInfo,
@@ -404,7 +387,7 @@ def train(
     data_time_m = AverageMeter()
     step_time_m = AverageMeter()
     save_examples = args.figures and (
-        epoch % args.figure_interval == 0 or epoch + 1 == args.epochs
+        epoch % args.figure_interval == 0 or epoch + 1 == args.epochs or args.debug
     )
     examples = None
 
@@ -539,8 +522,8 @@ def validate(
     args: Args,
     epoch: int,
     step: int,
-    model: Union[DDP, ImageGPT],
-    model_unwrap: ImageGPT,
+    model: Union[DDP, IGPT],
+    model_unwrap: IGPT,
     val_loader: DataLoader,
     clust: ClusterInfo,
     out_dir: Path,
@@ -553,7 +536,7 @@ def validate(
     data_time_m = AverageMeter()
     step_time_m = AverageMeter()
     save_examples = args.figures and (
-        epoch % args.figure_interval == 0 or epoch + 1 == args.epochs
+        epoch % args.figure_interval == 0 or epoch + 1 == args.epochs or args.debug
     )
     examples = None
 
@@ -648,7 +631,7 @@ def to_device(data: Union[torch.Tensor, Any], device: torch.device):
 
 def load_checkpoint(
     args: Args,
-    model: ImageGPT,
+    model: IGPT,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
 ):
@@ -673,7 +656,7 @@ def save_checkpoint(
     epoch: int,
     metric: float,
     is_best: bool,
-    model: Union[DDP, ImageGPT],
+    model: Union[DDP, IGPT],
     optimizer: torch.optim.Optimizer,
     out_dir: Path,
 ):
