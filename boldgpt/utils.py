@@ -2,6 +2,7 @@
 Misc utils.
 """
 
+import fnmatch
 import hashlib
 import logging
 import os
@@ -218,3 +219,17 @@ def to_pil_image(img: np.ndarray) -> Image.Image:
     img = (255 * img).astype(np.uint8)
     img = Image.fromarray(img)
     return img
+
+
+def set_requires_grad(
+    named_params: List[Tuple[str, torch.nn.Parameter]],
+    patterns: List[str],
+    requires_grad: bool = False,
+):
+    updated = []
+    for name, p in named_params:
+        for pattern in patterns:
+            if fnmatch.fnmatch(name, pattern):
+                p.requires_grad_(requires_grad)
+                updated.append(name)
+    return updated

@@ -13,7 +13,6 @@ from timm.data import resolve_model_data_config, str_to_interp_mode
 from torch import nn
 
 from boldgpt.data import DataConfig, load_nsd_flat_mask
-from boldgpt.features import FeatureExtractor
 from boldgpt.patching import MaskedPatchify
 from boldgpt.shuffle import permute, random_order
 from boldgpt.tokenizer import KMeansTokenizer
@@ -36,7 +35,6 @@ class IGPT(nn.Module):
         tokenizer: Optional[KMeansTokenizer],
         decoder: Transformer,
         encoder: Optional[nn.Module] = None,
-        layer: Optional[str] = None,
         shuffle: bool = True,
         modality: Literal["image", "bold"] = "bold",
     ):
@@ -57,10 +55,10 @@ class IGPT(nn.Module):
         if encoder is None:
             self.register_module("encoder", None)
         else:
-            assert layer, "layer is required when using an encoder"
+            # TODO: May want to use a `FeatureExtractor` to extract intermediate rather
+            # than final features. But currently the forward hooks interfere with model
+            # compilation.
             self.encoder = encoder
-            self.extractor = FeatureExtractor(encoder, layers=[layer])
-        self.layer = layer
 
     def forward(
         self,
@@ -85,8 +83,7 @@ class IGPT(nn.Module):
 
         # Get encoder context
         if self.is_seq2seq:
-            _, features = self.extractor(inputs)
-            context = features[self.layer]
+            context = self.encoder.forward_features(inputs)
         else:
             context = None
 
@@ -170,8 +167,7 @@ class IGPT(nn.Module):
 
         # Get encoder context
         if self.is_seq2seq and context is None:
-            _, features = self.extractor(inputs)
-            context = features[self.layer]
+            context = self.encoder.forward_features(inputs)
 
         sample = generate(
             model=self.decoder,
@@ -327,9 +323,9 @@ class IGPT(nn.Module):
         sample_mask_rgba = np.where(
             sample_mask[:, None],
             np.zeros((1, 4, 1, 1)),
-            np.array([1.0, 1.0, 1.0, 0.4]).reshape(1, 4, 1, 1),
+            np.array([1.0, 1.0, 1.0, 0.5]).reshape(1, 4, 1, 1),
         )
-        sample_mask_rgba = self.patchify.mask * sample_mask_rgba
+        sample_mask_rgba = self.patchify.mask.cpu().numpy() * sample_mask_rgba
 
         img_shape = images.shape[-2:]
         plotw = 3.0
@@ -653,7 +649,6 @@ def _create_image2bold(
     shuffle: bool = True,
     encoder_name: str = "eva02_base_patch14_224.mim_in22k",
     encoder_kwargs: Optional[Dict[str, Any]] = None,
-    encoder_layer: Optional[str] = "blocks.8",
     num_subs: int = 1024,
     embed_dim: int = 768,
     depth: int = 12,
@@ -709,7 +704,6 @@ def _create_image2bold(
         tokenizer=tokenizer,
         decoder=decoder,
         encoder=encoder,
-        layer=encoder_layer,
         shuffle=shuffle,
         modality="bold",
     )

@@ -13,7 +13,6 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-import wandb
 import yaml
 from hf_argparser import HfArg, HfArgumentParser
 from matplotlib import pyplot as plt
@@ -23,10 +22,18 @@ from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
+import wandb
 from boldgpt.data import create_data_loaders
 from boldgpt.models import IGPT, create_model, list_models
 from boldgpt.models.utils import get_no_decay_keys
-from boldgpt.utils import ClusterInfo, get_exp_name, get_sha, seed_hash, setup_logging
+from boldgpt.utils import (
+    ClusterInfo,
+    get_exp_name,
+    get_sha,
+    seed_hash,
+    set_requires_grad,
+    setup_logging,
+)
 
 np.set_printoptions(precision=3)
 
@@ -87,6 +94,13 @@ class Args:
         aliases=["--accum"], default=1, help="number of gradient accumulation steps"
     )
     clip_grad: Optional[float] = HfArg(default=1.0, help="gradient norm clipping")
+    freeze_keys: Optional[List[str]] = HfArg(
+        default=None, help="list of patterns for parameters to freeze"
+    )
+    unfreeze_keys: Optional[List[str]] = HfArg(
+        default=None,
+        help="list of patterns for parameters to unfreeze (applied after freeze)",
+    )
     # Paths
     out_dir: str = HfArg(default="results", help="path to root output directory")
     prefix: Optional[str] = HfArg(default=None, help="experiment name prefix")
@@ -212,13 +226,32 @@ def main(args: Args):
     )
     model: IGPT = model.to(clust.device)
     logging.info("%s", model)
-    logging.info("Params: %.0fM", sum(p.numel() for p in model.parameters()) / 1e6)
+
+    # Freeze some weights
+    named_params = list(model.named_parameters())
+    if args.freeze_keys:
+        logging.info("Freezing parameters matching patterns: %s", args.freeze_keys)
+        frozen = set_requires_grad(named_params, args.freeze_keys, requires_grad=False)
+        logging.info("Frozen parameters[:10]:\n%s", "\n".join(frozen[:10]))
+
+    if args.unfreeze_keys:
+        logging.info("Unfreezing parameters matching patterns: %s", args.unfreeze_keys)
+        unfrozen = set_requires_grad(
+            named_params, args.unfreeze_keys, requires_grad=True
+        )
+        logging.info("Unfrozen parameters[:10]:\n%s", "\n".join(unfrozen[:10]))
+
+    logging.info(
+        "Params (trainable): %.0fM (%.0fM)",
+        sum(p.numel() for p in model.parameters()) / 1e6,
+        sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6,
+    )
 
     # Tokenizer vocab
-    if args.categorical:
+    if args.categorical and args.checkpoint is None:
         assert (
             args.vocab_state is not None
-        ), "vocab_state is required for categorical model; run fit_vocab.py"
+        ), "vocab_state or checkpoint required for categorical model; run fit_vocab.py"
 
         logging.info("Loading tokenizer vocab state: %s", args.vocab_state)
         state_dict = torch.load(args.vocab_state, map_location=clust.device)
@@ -640,7 +673,13 @@ def load_checkpoint(
     model_state = {
         k.removeprefix("_orig_mod.module."): v for k, v in state["model"].items()
     }
-    model.load_state_dict(model_state, strict=args.strict_load)
+    missing_keys, unexpected_keys = model.load_state_dict(
+        model_state, strict=args.strict_load
+    )
+    if missing_keys:
+        logging.warning("Missing checkpoint keys:\n%s", missing_keys)
+    if unexpected_keys:
+        logging.warning("Unexpected checkpoint keys:\n%s", unexpected_keys)
 
     if not args.restart:
         optimizer.load_state_dict(state["optimizer"])

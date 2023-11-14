@@ -153,6 +153,6 @@ def get_shape(v):
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-k", "test_boldgpt"])
+    pytest.main([__file__, "-k", "test_image2bold_compile"])
     # pytest.main([__file__, "-k", "test_boldgpt_generate"])
     # pytest.main([__file__])

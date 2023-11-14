@@ -126,24 +126,25 @@ def load_nsd_flat(
         ds = load_dataset(
             "clane9/NSD-Flat", split="train", keep_in_memory=keep_in_memory
         )
+        ds.set_format("torch")
+        val_mask = ds["shared1000"]
         if columns:
             ds = ds.select_columns(columns)
-        ds.set_format("torch")
 
         if "train" in splits:
-            indices = torch.where(~ds["shared1000"])[0]
+            indices = torch.where(~val_mask)[0]
             dsets["train"] = ds.select(indices, keep_in_memory=keep_in_memory)
         if "val" in splits:
-            indices = torch.where(ds["shared1000"])[0]
+            indices = torch.where(val_mask)[0]
             dsets["val"] = ds.select(indices, keep_in_memory=keep_in_memory)
 
     if "test" in splits:
         ds = load_dataset(
             "clane9/NSD-Flat", split="test", keep_in_memory=keep_in_memory
         )
+        ds.set_format("torch")
         if columns:
             ds = ds.select_columns(columns)
-        ds.set_format("torch")
         dsets["test"] = ds
     return dsets
 
