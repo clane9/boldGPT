@@ -1,8 +1,10 @@
+import math
 from typing import Optional
 
 import torch
 from sklearn.decomposition import PCA, IncrementalPCA
 from torch import nn
+from torch.nn import functional as F
 
 
 class MaskedPCA(nn.Module):
@@ -36,24 +38,81 @@ class MaskedPCA(nn.Module):
         self.fc.load_state_dict(state_dict)
 
     def forward(self, embeddings: torch.Tensor):
-        return self.fc(embeddings)
+        values = self.fc(embeddings)
+        recon = self.masked_fill(values)
+        return recon
+
+    def masked_fill(self, values: torch.Tensor):
+        shape = values.shape[:-1]
+        filled = torch.zeros(
+            shape + self.mask.shape, dtype=values.dtype, device=values.device
+        )
+        filled[..., self.mask] = values
+        return filled
 
     @torch.no_grad()
-    def encode(self, activity: torch.Tensor, mask: Optional[torch.Tensor] = None):
+    def encode(
+        self,
+        activity: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        n_components: Optional[int] = None,
+        lambd: float = 0.0,
+    ):
+        if n_components is None:
+            n_components = self.dim
         activity = activity[:, self.mask]
         activity = activity - self.fc.bias
 
         if mask is None:
-            embeddings = activity @ self.fc.weight
+            embeddings = activity @ self.fc.weight[:, :n_components]
         else:
             mask = mask[:, self.mask]
             # (N, D, d)
-            A = self.fc.weight.expand(activity.size(0), -1, -1)
+            A = self.fc.weight[:, :n_components]
+            A = A.expand(activity.size(0), -1, -1)
             A = A * mask.unsqueeze(2)
             # (N, D, 1)
             B = (activity * mask).unsqueeze(2)
             # (N, d, 1)
-            embeddings = torch.linalg.lstsq(A, B).solution
+            embeddings = _ridge_regression(A, B, lambd=lambd)
             embeddings = embeddings.squeeze(2)
 
+        if n_components < self.dim:
+            embeddings = F.pad(embeddings, (0, self.dim - n_components))
         return embeddings
+
+    def components(self):
+        return self.masked_fill(self.fc.weight.detach().t())
+
+
+def _ridge_regression(A: torch.Tensor, B: torch.Tensor, lambd: float = 1.0):
+    """
+    Solve the ridge regression problem:
+
+        min X || A X - B ||_F^2 + lambd || X ||_F^2
+
+    which can be equivalently formulated as:
+
+        min X || [ A; sqrt(lambd) I ] X - [B; 0] ||_F^2
+
+    Args:
+        A: shape (N, D, d)
+        B: shape (N, D, K)
+        lambd: regularization penalty
+
+    Returns:
+        Regression solution X, shape (N, d, K)
+    """
+    N, _, d = A.shape
+    _, _, K = B.shape
+
+    if lambd > 0:
+        I = math.sqrt(lambd) * torch.eye(d, d, device=A.device, dtype=A.dtype)
+        I = I.expand(N, -1, -1)
+        A = torch.cat([A, I], dim=1)
+
+        Z = torch.zeros(N, d, K, device=A.device, dtype=A.dtype)
+        B = torch.cat([B, Z], dim=1)
+
+    beta = torch.linalg.lstsq(A, B).solution
+    return beta
