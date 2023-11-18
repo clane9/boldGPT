@@ -29,7 +29,7 @@ def test_cbip(training: bool, mask_ratio: float):
 
     batch = {
         "image": torch.randn(4, 3, 224, 224),
-        "activity": model.patchify.mask * torch.randn(4, 215, 200),
+        "activity": torch.randn(4, 215, 200),
         "subject_id": torch.arange(4),
         "nsd_id": torch.arange(4),
     }

@@ -74,10 +74,10 @@ def get_collate(
     img_std: Tuple[float, float, float] = IMAGENET_DEFAULT_STD,
     interp_mode: InterpolationMode = InterpolationMode.BICUBIC,
     crop_scale: float = 1.0,
-    train: bool = True,
+    jitter_prob: float = 0.0,
 ) -> Collate:
     transforms = [ToFloatTensor()]
-    if train and crop_scale < 1.0:
+    if crop_scale < 1.0:
         transforms.append(
             T.RandomResizedCrop(
                 size=img_size,
@@ -94,6 +94,12 @@ def get_collate(
                 # images should be square but just to be safe
                 T.CenterCrop(img_size),
             ]
+        )
+
+    if jitter_prob > 0:
+        transforms.append(
+            # Same as default in timm, no hue
+            T.RandomApply([T.ColorJitter(0.4, 0.4, 0.4)], p=jitter_prob)
         )
     transforms.append(T.Normalize(mean=img_mean, std=img_std))
 
@@ -187,6 +193,7 @@ def create_data_loaders(
     cfg: DataConfig,
     keep_in_memory: bool = False,
     crop_scale: float = 1.0,
+    jitter_prob: float = 0.0,
     distributed: bool = False,
     batch_size: int = 512,
     num_workers: int = 0,
@@ -208,19 +215,27 @@ def create_data_loaders(
     samplers = {}
     for split, ds in dsets.items():
         samplers[split] = _get_sampler(
-            ds, train=split == "train", distributed=distributed
+            ds, shuffle=split == "train", distributed=distributed
         )
 
     collate_fns = {}
     for split in dsets:
-        collate_fns[split] = get_collate(
-            img_size=cfg.img_size,
-            img_mean=cfg.img_mean,
-            img_std=cfg.img_std,
-            interp_mode=cfg.interp_mode,
-            crop_scale=crop_scale,
-            train=split == "train",
-        )
+        if split == "train":
+            collate_fns[split] = get_collate(
+                img_size=cfg.img_size,
+                img_mean=cfg.img_mean,
+                img_std=cfg.img_std,
+                interp_mode=cfg.interp_mode,
+                crop_scale=crop_scale,
+                jitter_prob=jitter_prob,
+            )
+        else:
+            collate_fns[split] = get_collate(
+                img_size=cfg.img_size,
+                img_mean=cfg.img_mean,
+                img_std=cfg.img_std,
+                interp_mode=cfg.interp_mode,
+            )
 
     loaders = {}
     for split in dsets:
@@ -238,10 +253,10 @@ def create_data_loaders(
 
 
 def _get_sampler(
-    dataset: Dataset, train: bool = True, distributed: bool = False
+    dataset: Dataset, shuffle: bool = True, distributed: bool = False
 ) -> Optional[Sampler]:
     if distributed:
-        sampler = DistributedSampler(dataset, shuffle=train)
+        sampler = DistributedSampler(dataset, shuffle=shuffle)
     else:
-        sampler = RandomSampler(dataset) if train else None
+        sampler = RandomSampler(dataset) if shuffle else None
     return sampler

@@ -13,7 +13,6 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-import wandb
 import yaml
 from hf_argparser import HfArg, HfArgumentParser
 from matplotlib import pyplot as plt
@@ -23,6 +22,7 @@ from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
+import wandb
 from boldgpt.data import create_data_loaders
 from boldgpt.models import IGPT, create_model, list_models
 from boldgpt.models.utils import get_no_decay_keys
@@ -47,7 +47,7 @@ class Args:
         default="boldgpt_small_patch10", help=f"model ({', '.join(list_models())})"
     )
     categorical: bool = HfArg(
-        aliases=["--cat"], default=True, help="use categorical cross-entropy loss"
+        aliases=["--cat"], default=False, help="use categorical cross-entropy loss"
     )
     vocab_size: int = HfArg(
         aliases=["--vs"], default=1024, help="visual token vocab size"
@@ -55,15 +55,21 @@ class Args:
     vocab_state: Optional[str] = HfArg(
         aliases=["--vstate"], default=None, help="tokenizer vocab state to load"
     )
+    with_sub_embed: bool = HfArg(
+        aliases=["--sub"], default=True, help="learn subject-specific embedding"
+    )
     shuffle: Optional[bool] = HfArg(
         default=True, help="shuffle patch ordering on each iteration"
     )
-    with_sub_embed: bool = HfArg(
-        aliases=["--sub"], default=True, help="learn subject-specific embedding"
+    mask_ratio: Optional[float] = HfArg(
+        aliases=["--mr"], default=None, help="patch masking ratio"
     )
     # Regularization and augmentation
     crop_scale: float = HfArg(
         aliases=["--crop"], default=1.0, help="image random crop scale"
+    )
+    jitter_prob: float = HfArg(
+        aliases=["--jitter"], default=0.0, help="color jitter probability"
     )
     drop_rate: float = HfArg(aliases=["--dr"], default=0.0, help="head dropout rate")
     sub_drop_rate: float = HfArg(
@@ -216,8 +222,9 @@ def main(args: Args):
         args.model,
         categorical=args.categorical,
         vocab_size=args.vocab_size,
-        shuffle=args.shuffle,
         with_sub_embed=args.with_sub_embed,
+        shuffle=args.shuffle,
+        mask_ratio=args.mask_ratio,
         drop_rate=args.drop_rate,
         sub_drop_rate=args.sub_drop_rate,
         proj_drop_rate=args.proj_drop_rate,
@@ -264,6 +271,7 @@ def main(args: Args):
         data_config,
         keep_in_memory=clust.device.type == "cuda" and not args.debug,
         crop_scale=args.crop_scale,
+        jitter_prob=args.jitter_prob,
         distributed=clust.ddp,
         batch_size=args.batch_size,
         num_workers=args.workers,

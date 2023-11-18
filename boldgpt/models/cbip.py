@@ -110,6 +110,9 @@ class CBIP(nn.Module):
         target = target.detach()
         output = output.detach()
 
+        # Ensure activity are masked
+        activity = self.patchify.mask * activity
+
         # Get retrieval images in batch
         similarity = output @ target.t()
         ret_sim, ret_indices = torch.max(similarity, dim=1)
@@ -155,7 +158,7 @@ class CBIP(nn.Module):
         if is_masked:
             hidden_mask_rgba = np.where(
                 hidden_mask[:, None],
-                np.array([1.0, 1.0, 1.0, 0.5]).reshape(1, 4, 1, 1),
+                np.array([1.0, 1.0, 1.0, 0.6]).reshape(1, 4, 1, 1),
                 np.zeros((1, 4, 1, 1)),
             )
             hidden_mask_rgba = self.patchify.mask.cpu().numpy() * hidden_mask_rgba
