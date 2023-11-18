@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, List, Literal, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -228,6 +228,7 @@ class Transformer(nn.Module):
         num_subs: int = 1024,
         num_registers: int = 0,
         num_classes: int = 4096,
+        global_pool: Optional[Literal["avg", "token", "reg"]] = None,
         embed_dim: int = 768,
         context_dim: int = 768,
         depth: int = 12,
@@ -245,11 +246,16 @@ class Transformer(nn.Module):
         drop_path_rate: float = 0.0,
     ):
         super().__init__()
+        assert (
+            global_pool != "reg" or num_registers > 0
+        ), "Must set num_registers > 0 to use 'reg' global pooling"
+
         self.num_patches = num_patches
         self.in_features = in_features
         self.num_subs = num_subs
         self.num_registers = num_registers
         self.num_classes = num_classes
+        self.global_pool = global_pool
         self.embed_dim = embed_dim
         self.context_dim = context_dim
         self.with_sub_embed = with_sub_embed
@@ -302,7 +308,10 @@ class Transformer(nn.Module):
                 for i in range(depth)
             ]
         )
-        self.norm = nn.LayerNorm(embed_dim)
+
+        use_fc_norm = self.global_pool in {"avg", "reg"}
+        self.norm = nn.Identity() if use_fc_norm else nn.LayerNorm(embed_dim)
+        self.fc_norm = nn.LayerNorm(embed_dim) if use_fc_norm else nn.Identity()
 
         # Classifier Head
         self.head_drop = nn.Dropout(drop_rate)
@@ -448,6 +457,13 @@ class Transformer(nn.Module):
         return x
 
     def forward_head(self, x: torch.Tensor) -> torch.Tensor:
+        if self.global_pool == "avg":
+            x = x[:, 1:].mean(dim=1)
+        elif self.global_pool == "reg":
+            x = x[:, -self.num_registers :].mean(dim=1)
+        elif self.global_pool:
+            x = x[:, 0]
+        x = self.fc_norm(x)
         x = self.head_drop(x)
         x = self.head(x)
         return x

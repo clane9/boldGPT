@@ -4,7 +4,6 @@ from typing import Dict, Literal, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-from matplotlib import colormaps
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
 from torch import nn
@@ -16,10 +15,7 @@ from boldgpt.tokenizer import KMeansTokenizer
 from . import constants as C
 from .registry import register_model
 from .transformer import Transformer
-from .utils import r2_score
-
-CMAP = colormaps.get_cmap("turbo")
-CMAP.set_bad("gray")
+from .utils import imshow, r2_score
 
 
 class BEiT(nn.Module):
@@ -192,7 +188,7 @@ class BEiT(nn.Module):
 
             plt.sca(axs[ii, 0])
             tform = axs[ii, 0].transAxes
-            _imshow(images[ii])
+            imshow(images[ii])
             plt.text(
                 0.5,
                 0.98,
@@ -208,7 +204,7 @@ class BEiT(nn.Module):
 
             plt.sca(axs[ii, 1])
             tform = axs[ii, 1].transAxes
-            _imshow(visible[ii])
+            imshow(visible[ii])
             plt.text(
                 0.5, 0.98, "Visible", ha="center", va="top", transform=tform, **textdict
             )
@@ -225,7 +221,7 @@ class BEiT(nn.Module):
             if self.is_categorical:
                 plt.sca(axs[ii, 2])
                 tform = axs[ii, 2].transAxes
-                _imshow(target[ii])
+                imshow(target[ii])
                 plt.text(
                     0.5,
                     0.98,
@@ -248,7 +244,7 @@ class BEiT(nn.Module):
             col = 3 if self.is_categorical else 2
             plt.sca(axs[ii, col])
             tform = axs[ii, col].transAxes
-            _imshow(recon[ii])
+            imshow(recon[ii])
             plt.text(
                 0.5, 0.98, "Pred", ha="center", va="top", transform=tform, **textdict
             )
@@ -286,13 +282,6 @@ def _sample_masked_pos(
         mask_ratio = torch.rand(batch_size, 1, device=device)
     bool_masked_pos = torch.rand(batch_size, num_patches, device=device) < mask_ratio
     return bool_masked_pos
-
-
-def _imshow(img: np.ndarray, **kwargs):
-    kwargs = {"interpolation": "nearest", "cmap": CMAP, **kwargs}
-    img = np.where(img == 0, np.nan, img)
-    plt.imshow(img, **kwargs)
-    plt.axis("off")
 
 
 def _create_beit(

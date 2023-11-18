@@ -1,12 +1,10 @@
 import logging
-import re
 from typing import Any, Dict, Literal, Optional, Tuple
 
 import numpy as np
 import timm
 import torch
 import torch.nn.functional as F
-from matplotlib import colormaps
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
 from timm.data import resolve_model_data_config, str_to_interp_mode
@@ -16,16 +14,12 @@ from boldgpt.data import DataConfig, load_nsd_flat_mask
 from boldgpt.patching import MaskedPatchify
 from boldgpt.shuffle import permute, random_order
 from boldgpt.tokenizer import KMeansTokenizer
-from boldgpt.utils import resize_and_pad
 
 from . import constants as C
 from .generate import generate
 from .registry import register_configs, register_model
 from .transformer import Transformer
-from .utils import r2_score
-
-CMAP = colormaps.get_cmap("turbo")
-CMAP.set_bad("gray")
+from .utils import imshow, infer_embed_dim, r2_score, to_numpy
 
 
 class IGPT(nn.Module):
@@ -292,7 +286,7 @@ class IGPT(nn.Module):
             "recon_r2": recon_r2,
             "sample_r2": sample_r2,
         }
-        examples = {k: _to_numpy(v) for k, v in examples.items()}
+        examples = {k: to_numpy(v) for k, v in examples.items()}
         return examples
 
     def plot_examples(
@@ -358,7 +352,7 @@ class IGPT(nn.Module):
             if self.is_seq2seq:
                 plt.sca(axs[ii, col])
                 tform = axs[ii, col].transAxes
-                _imshow(inputs[ii], img_shape=img_shape)
+                imshow(inputs[ii], img_shape=img_shape)
                 plt.text(
                     0.5,
                     0.98,
@@ -372,7 +366,7 @@ class IGPT(nn.Module):
 
             plt.sca(axs[ii, col])
             tform = axs[ii, col].transAxes
-            _imshow(images[ii])
+            imshow(images[ii])
             plt.text(
                 0.5,
                 0.98,
@@ -390,7 +384,7 @@ class IGPT(nn.Module):
             if self.is_categorical:
                 plt.sca(axs[ii, col])
                 tform = axs[ii, col].transAxes
-                _imshow(target[ii])
+                imshow(target[ii])
                 plt.text(
                     0.5,
                     0.98,
@@ -413,7 +407,7 @@ class IGPT(nn.Module):
 
             plt.sca(axs[ii, col])
             tform = axs[ii, col].transAxes
-            _imshow(recon[ii])
+            imshow(recon[ii])
             plt.text(
                 0.5, 0.98, "Pred", ha="center", va="top", transform=tform, **textdict
             )
@@ -430,8 +424,8 @@ class IGPT(nn.Module):
 
             plt.sca(axs[ii, col])
             tform = axs[ii, col].transAxes
-            _imshow(sample[ii])
-            _imshow(sample_mask_rgba[ii])
+            imshow(sample[ii])
+            imshow(sample_mask_rgba[ii])
             plt.text(
                 0.5, 0.98, "Sample", ha="center", va="top", transform=tform, **textdict
             )
@@ -448,7 +442,7 @@ class IGPT(nn.Module):
 
             plt.sca(axs[ii, col])
             tform = axs[ii, col].transAxes
-            _imshow(order_map[ii])
+            imshow(order_map[ii])
             plt.text(
                 0.5, 0.98, "Order", ha="center", va="top", transform=tform, **textdict
             )
@@ -494,26 +488,6 @@ class IGPT(nn.Module):
             f"shuffle={self.shuffle}, "
             f"modality={self.modality}"
         )
-
-
-def _to_numpy(x: Optional[torch.Tensor]) -> Optional[np.ndarray]:
-    if x is not None:
-        x = x.detach().cpu().numpy()
-    return x
-
-
-def _imshow(img: np.ndarray, img_shape: Optional[Tuple[int, int]] = None, **kwargs):
-    kwargs = {"interpolation": "nearest", "cmap": CMAP, **kwargs}
-    if img.ndim == 2:
-        # (H, W)
-        img = np.where(img == 0, np.nan, img)
-    else:
-        # (C, H, W)
-        img = np.transpose(img, (1, 2, 0))
-    if img_shape and img.shape[-2:] != img_shape:
-        img = resize_and_pad(img, img_shape)
-    plt.imshow(img, **kwargs)
-    plt.axis("off")
 
 
 def _create_boldgpt(
@@ -675,7 +649,7 @@ def _create_image2bold(
     encoder_kwargs = encoder_kwargs or {}
     encoder_kwargs = {"pretrained": True, **encoder_kwargs}
     encoder = timm.create_model(encoder_name, **encoder_kwargs)
-    encoder_dim = _infer_embed_dim(encoder_name)
+    encoder_dim = infer_embed_dim(encoder_name)
 
     decoder = Transformer(
         num_patches=patchify.num_patches,
@@ -708,22 +682,6 @@ def _create_image2bold(
         modality="bold",
     )
     return model
-
-
-def _infer_embed_dim(arch: str) -> int:
-    dims = {
-        "tiny": 192,
-        "small": 384,
-        "base": 768,
-        "large": 1024,
-    }
-
-    pattern = f"_({'|'.join(dims)})_"
-    match = re.search(pattern, arch)
-    if match is None:
-        raise ValueError(f"Arch {arch} doesn't match any expected dims: {list(dims)}")
-    dim = dims[match.group(1)]
-    return dim
 
 
 @register_model

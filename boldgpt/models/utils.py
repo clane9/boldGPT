@@ -1,6 +1,15 @@
-from typing import List, Literal, Tuple, Union
+import re
+from typing import Any, List, Literal, Optional, Tuple, Union
 
+import numpy as np
 import torch
+from matplotlib import colormaps
+from matplotlib import pyplot as plt
+
+from boldgpt.utils import resize_and_pad
+
+CMAP = colormaps.get_cmap("turbo")
+CMAP.set_bad("gray")
 
 
 def get_no_decay_keys(model: torch.nn.Module) -> List[str]:
@@ -16,6 +25,22 @@ def get_no_decay_keys(model: torch.nn.Module) -> List[str]:
         keys.extend([f"{name}.{key}" for key in get_no_decay_keys(module)])
 
     return keys
+
+
+def infer_embed_dim(arch: str) -> int:
+    dims = {
+        "tiny": 192,
+        "small": 384,
+        "base": 768,
+        "large": 1024,
+    }
+
+    pattern = f"_({'|'.join(dims)})_"
+    match = re.search(pattern, arch)
+    if match is None:
+        raise ValueError(f"Arch {arch} doesn't match any expected dims: {list(dims)}")
+    dim = dims[match.group(1)]
+    return dim
 
 
 def r2_score(
@@ -38,3 +63,23 @@ def r2_score(
         raise ValueError(f"Invalid reduction {reduction}")
 
     return score
+
+
+def to_numpy(x: Any) -> Any:
+    if isinstance(x, torch.Tensor):
+        x = x.detach().cpu().numpy()
+    return x
+
+
+def imshow(img: np.ndarray, img_shape: Optional[Tuple[int, int]] = None, **kwargs):
+    kwargs = {"interpolation": "nearest", "cmap": CMAP, **kwargs}
+    if img.ndim == 2:
+        # (H, W)
+        img = np.where(img == 0, np.nan, img)
+    else:
+        # (C, H, W)
+        img = np.transpose(img, (1, 2, 0))
+    if img_shape and img.shape[-2:] != img_shape:
+        img = resize_and_pad(img, img_shape)
+    plt.imshow(img, **kwargs)
+    plt.axis("off")

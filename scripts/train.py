@@ -13,6 +13,7 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
+import wandb
 import yaml
 from hf_argparser import HfArg, HfArgumentParser
 from matplotlib import pyplot as plt
@@ -22,7 +23,6 @@ from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
-import wandb
 from boldgpt.data import create_data_loaders
 from boldgpt.models import IGPT, create_model, list_models
 from boldgpt.models.utils import get_no_decay_keys
@@ -419,8 +419,12 @@ def train(
     loss_m = AverageMeter()
     data_time_m = AverageMeter()
     step_time_m = AverageMeter()
-    save_examples = args.figures and (
-        epoch % args.figure_interval == 0 or epoch + 1 == args.epochs or args.debug
+    save_examples = (
+        args.figures
+        and hasattr(model_unwrap, "plot_examples")
+        and (
+            epoch % args.figure_interval == 0 or epoch + 1 == args.epochs or args.debug
+        )
     )
     examples = None
 
@@ -568,8 +572,12 @@ def validate(
     loss_m = AverageMeter()
     data_time_m = AverageMeter()
     step_time_m = AverageMeter()
-    save_examples = args.figures and (
-        epoch % args.figure_interval == 0 or epoch + 1 == args.epochs or args.debug
+    save_examples = (
+        args.figures
+        and hasattr(model_unwrap, "plot_examples")
+        and (
+            epoch % args.figure_interval == 0 or epoch + 1 == args.epochs or args.debug
+        )
     )
     examples = None
 
