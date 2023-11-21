@@ -64,6 +64,12 @@ class Args:
     mask_ratio: Optional[float] = HfArg(
         aliases=["--mr"], default=None, help="patch masking ratio"
     )
+    global_pool: Optional[str] = HfArg(
+        aliases=["--pool"], default="avg", help="global pooling mode"
+    )
+    num_registers: int = HfArg(
+        aliases=["--nreg"], default=0, help="number of register tokens"
+    )
     # Regularization and augmentation
     crop_scale: float = HfArg(
         aliases=["--crop"], default=1.0, help="image random crop scale"
@@ -225,6 +231,8 @@ def main(args: Args):
         with_sub_embed=args.with_sub_embed,
         shuffle=args.shuffle,
         mask_ratio=args.mask_ratio,
+        global_pool=args.global_pool,
+        num_registers=args.num_registers,
         drop_rate=args.drop_rate,
         sub_drop_rate=args.sub_drop_rate,
         proj_drop_rate=args.proj_drop_rate,

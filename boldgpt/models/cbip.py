@@ -375,7 +375,7 @@ def _create_cbip(
         num_subs=num_subs,
         num_registers=num_registers,
         num_classes=image_encoder.num_classes,
-        global_pool=global_pool,
+        global_pool=global_pool or "reg",
         embed_dim=embed_dim,
         depth=depth,
         num_heads=num_heads,
