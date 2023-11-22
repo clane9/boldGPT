@@ -21,32 +21,48 @@ from .registry import register_model
 from .transformer import Transformer
 from .utils import imshow, to_numpy
 
+NSD_NUM_IMAGES = 70000
+
 
 class CBIP(nn.Module):
+    """
+    Contrastive BOLD-Image pretraining with a frozen image encoder.
+    Effectively model distillation with CLIP targets and loss.
+    """
+
     def __init__(
         self,
         patchify: MaskedPatchify,
         bold_encoder: Transformer,
         image_encoder: nn.Module,
         mask_ratio: Optional[float] = None,
-        siglip: bool = False,
+        lossfun: Literal["clip", "siglip", "cosine"] = "clip",
+        cache_targets: bool = True,
     ):
         super().__init__()
         self.mask_ratio = mask_ratio
-        self.siglip = siglip
         self.with_sub_embed = bold_encoder.with_sub_embed
+        self.cache_targets = cache_targets
 
         self.patchify = patchify
         self.bold_encoder = bold_encoder
         self.image_encoder = image_encoder
 
-        self.loss_module = SigLIPLoss() if siglip else CLIPLoss()
+        if lossfun == "clip":
+            self.loss_module = CLIPLoss()
+        elif lossfun == "siglip":
+            self.loss_module = SigLIPLoss()
+        elif lossfun == "cosine":
+            self.loss_module = CosineLoss()
+        else:
+            raise ValueError(f"Unrecognized lossfun {lossfun}")
+
+        self._target_cache: Optional[torch.Tensor] = None
 
     def forward(
         self,
         batch: Dict[str, torch.Tensor],
     ) -> Tuple[torch.Tensor, Dict[str, Optional[torch.Tensor]]]:
-        images = batch["image"]
         activity = batch["activity"]
         subid = batch["subject_id"] if self.with_sub_embed else None
 
@@ -65,7 +81,7 @@ class CBIP(nn.Module):
             input_patches = patches
 
         output = self.bold_encoder(input_patches, sub_indices=subid, order=input_order)
-        target = self.image_encoder(images)
+        target = self.forward_targets(batch)
 
         output = F.normalize(output, dim=-1)
         target = F.normalize(target, dim=-1)
@@ -79,6 +95,24 @@ class CBIP(nn.Module):
             output=output,
         )
         return output, state
+
+    def forward_targets(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        images = batch["image"]
+        sample_ids = batch["nsd_id"]
+
+        if self._target_cache is None:
+            self._target_cache = torch.zeros(
+                (NSD_NUM_IMAGES, self.image_encoder.num_classes), device=images.device
+            )
+
+        target = self._target_cache[sample_ids]
+        unset_mask = torch.all(target == 0, dim=1)
+        if unset_mask.any():
+            with torch.no_grad():
+                mask_target = self.image_encoder(images[unset_mask])
+            target[unset_mask] = mask_target
+            self._target_cache[sample_ids[unset_mask]] = mask_target
+        return target
 
     def loss_fn(
         self,
@@ -263,7 +297,7 @@ class CBIP(nn.Module):
         return DataConfig(**cfg)
 
     def extra_repr(self) -> str:
-        return f"mask_ratio={self.mask_ratio}, siglip={self.siglip}"
+        return f"mask_ratio={self.mask_ratio}, cache_targets={self.cache_targets}"
 
 
 class CLIPLoss(nn.Module):
@@ -334,6 +368,21 @@ class SigLIPLoss(nn.Module):
         return loss
 
 
+class CosineLoss(nn.Module):
+    """
+    Cosine similarity loss function following SimSiam
+    """
+
+    def forward(
+        self,
+        source_embeddings: torch.Tensor,
+        target_embeddings: torch.Tensor,
+        sample_ids: Optional[torch.Tensor] = None,
+    ):
+        loss = -(source_embeddings * target_embeddings).sum(dim=-1).mean()
+        return loss
+
+
 def _create_cbip(
     *,
     mask: Optional[np.ndarray] = None,
@@ -341,7 +390,7 @@ def _create_cbip(
     ordering: str = "radial",
     with_sub_embed: bool = True,
     mask_ratio: Optional[float] = 0.5,
-    siglip: bool = False,
+    lossfun: Optional[Literal["clip", "siglip", "cosine"]] = "clip",
     encoder_name: str = "vit_large_patch14_clip_224.openai",
     encoder_kwargs: Optional[Dict[str, Any]] = None,
     num_subs: int = 1024,
@@ -397,7 +446,7 @@ def _create_cbip(
         bold_encoder=bold_encoder,
         image_encoder=image_encoder,
         mask_ratio=mask_ratio,
-        siglip=siglip,
+        lossfun=lossfun or "clip",
     )
     return model
 

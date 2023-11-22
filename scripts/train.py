@@ -47,7 +47,7 @@ class Args:
         default="boldgpt_small_patch10", help=f"model ({', '.join(list_models())})"
     )
     categorical: bool = HfArg(
-        aliases=["--cat"], default=False, help="use categorical cross-entropy loss"
+        aliases=["--cat"], default=False, help="predict discrete tokens"
     )
     vocab_size: int = HfArg(
         aliases=["--vs"], default=1024, help="visual token vocab size"
@@ -61,6 +61,7 @@ class Args:
     shuffle: Optional[bool] = HfArg(
         default=True, help="shuffle patch ordering on each iteration"
     )
+    lossfun: Optional[str] = HfArg(default=None, help="loss function")
     mask_ratio: Optional[float] = HfArg(
         aliases=["--mr"], default=None, help="patch masking ratio"
     )
@@ -230,6 +231,7 @@ def main(args: Args):
         vocab_size=args.vocab_size,
         with_sub_embed=args.with_sub_embed,
         shuffle=args.shuffle,
+        lossfun=args.lossfun,
         mask_ratio=args.mask_ratio,
         global_pool=args.global_pool,
         num_registers=args.num_registers,
